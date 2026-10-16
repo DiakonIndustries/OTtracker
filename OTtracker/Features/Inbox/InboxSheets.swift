@@ -118,7 +118,7 @@ struct InboxDateSheet: View {
                     DateTimeField(title: fieldTitle, date: dateBinding, calendar: model.calendar)
                     contextRows
                 } footer: {
-                    Text(footer)
+                    Text(footerText)
                 }
             }
             .navigationTitle(action.title)
@@ -245,7 +245,7 @@ struct InboxDateSheet: View {
         return true
     }
 
-    private var footer: String {
+    private var footerText: String {
         switch action {
         case .setExitTime:
             return "The session closes at this time and the day is recomputed. The exit must be after the arrival and not in the future."
