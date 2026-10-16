@@ -35,3 +35,30 @@ jobs:
       - name: swift test
         working-directory: Packages/OTCore
         run: swift test --parallel 2>&1 | tail -n 60
+
+  ios-build:
+    name: iOS app build (simulator)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+      - name: Resolve packages and list
+        run: xcodebuild -project OTtracker.xcodeproj -list
+      - name: Build for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild -project OTtracker.xcodeproj -scheme OTtracker \
+            -destination 'generic/platform=iOS Simulator' -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD|Compiling|Linking" | tail -n 80
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build.log
