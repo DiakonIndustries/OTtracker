@@ -170,8 +170,9 @@ struct BalanceWidgetMediumView: View {
         let status = WidgetsTimerStatus(snapshot: snapshot, now: now)
         HStack(alignment: .top, spacing: 12) {
             BalanceWidgetSmallView(snapshot: snapshot, now: now)
-            Divider()
-                .overlay(WidgetsPalette.faint)
+            Rectangle()
+                .fill(WidgetsPalette.faint)
+                .frame(width: 1)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Today")
                     .font(.caption)
