@@ -103,7 +103,7 @@ struct InboxItemRow: View {
     private var stamp: some View {
         if item.kind == .timer, let session = activeTimerSession {
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text("\(session.state == .running ? "Running" : "Paused") \(DurationFormat.clockWithSeconds(session.activeSeconds(now: context.date)))")
+                Text(timerLabel(session, at: context.date))
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -114,6 +114,12 @@ struct InboxItemRow: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// "Running 4:12:07" or "Paused 3:58:00".
+    private func timerLabel(_ session: ManualSession, at date: Date) -> String {
+        let state = session.state == .running ? "Running" : "Paused"
+        return "\(state) \(DurationFormat.clockWithSeconds(session.activeSeconds(now: date)))"
     }
 
     private var activeTimerSession: ManualSession? {
