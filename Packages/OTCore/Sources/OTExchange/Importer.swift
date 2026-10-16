@@ -207,8 +207,11 @@ enum MergeEngine {
     }
 
     /// The store's location with that name, else a placeholder (0, 0, 200 m, inactive) created once.
+    /// A UUID in place of a name (the export's fallback for a location that no longer exists) is
+    /// that location's ID, kept as it is rather than turned into a UUID-named placeholder.
     static func resolveLocation(named name: String, bundle: ImportBundle, store: inout Store, tally: inout Tally) -> UUID {
         let trimmed = ExchangeFormat.trim(name)
+        if let id = UUID(uuidString: trimmed) { return store.location(id: id)?.id ?? id }
         let effectiveName = trimmed.isEmpty ? "Unknown location" : trimmed
         if let l = store.location(named: effectiveName) { return l.id }
         let key = ExchangeFormat.nameKey(effectiveName)

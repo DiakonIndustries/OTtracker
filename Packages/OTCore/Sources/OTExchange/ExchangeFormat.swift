@@ -183,6 +183,13 @@ extension Cell {
         }
     }
 
+    /// Free text exactly as the cell holds it (notes, reasons, names): surrounding whitespace is kept
+    /// so an untouched export imports back unchanged. Non-text cells read as `exText`.
+    var exRawText: String {
+        if case .string(let s) = self { return s }
+        return exText
+    }
+
     var exIsEmpty: Bool {
         if case .empty = self { return true }
         if case .string(let s) = self { return ExchangeFormat.trim(s).isEmpty }

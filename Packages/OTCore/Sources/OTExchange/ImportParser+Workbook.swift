@@ -39,7 +39,10 @@ extension ImportParser {
     /// skipped; each bad row becomes an `InvalidRow` with the sheet row number.
     public static func parse(workbook: Workbook, store: Store) -> ImportBundle {
         var b = ImportBundle()
-        let cal = store.calendar
+        // Text dates and clock times are wall-clock in the zone the file was written in (its Settings
+        // sheet) when it says so, otherwise in the store's zone.
+        var cal = store.calendar
+        if let tz = workbookTimeZone(workbook) { cal.timeZone = tz }
         var invalid: [ImportBundle.InvalidRow] = []
 
         func reject(_ sheet: String, _ row: Int, _ why: String) {
@@ -53,8 +56,9 @@ extension ImportParser {
         if let sheet = workbook.sheet(named: "Locations") {
             let r = SheetReader(sheet)
             for (row, cells) in r.dataRows {
-                let name = r.cell(cells, "Name", "Location").exText
-                guard !name.isEmpty else { reject(r.name, row, "missing name"); continue }
+                let nameCell = r.cell(cells, "Name", "Location")
+                guard !nameCell.exIsEmpty else { reject(r.name, row, "missing name"); continue }
+                let name = nameCell.exRawText
                 let idCell = r.cell(cells, "ID")
                 guard idCell.exIsEmpty || idCell.exUUID != nil else { reject(r.name, row, "bad ID '\(idCell.exText)'"); continue }
                 let lat = r.cell(cells, "Latitude", "Lat")
@@ -104,15 +108,16 @@ extension ImportParser {
                 default: reject(r.name, row, "Gap After must be 'work', 'personal' or empty"); continue
                 }
                 b.presence.append(.init(id: idCell.exUUID, locationName: location, enteredAt: entered, exitedAt: exited,
-                                        source: src, followingGapIsWork: gap, note: r.cell(cells, "Note").exText))
+                                        source: src, followingGapIsWork: gap, note: r.cell(cells, "Note").exRawText))
             }
         }
 
         if let sheet = workbook.sheet(named: "Manual") {
             let r = SheetReader(sheet)
             for (row, cells) in r.dataRows {
-                let category = r.cell(cells, "Category").exText
-                guard !category.isEmpty else { reject(r.name, row, "missing category"); continue }
+                let categoryCell = r.cell(cells, "Category")
+                guard !categoryCell.exIsEmpty else { reject(r.name, row, "missing category"); continue }
+                let category = categoryCell.exRawText
                 guard let started = r.cell(cells, "Started", "Started At", "Start").exDate(calendar: cal) else {
                     reject(r.name, row, "missing or bad Started time"); continue
                 }
@@ -132,7 +137,7 @@ extension ImportParser {
                                                    text: r.cell(cells, "Segments").exText, calendar: cal) else {
                     reject(r.name, row, "bad Segments text (expected 'HH:mm–HH:mm; HH:mm–HH:mm')"); continue
                 }
-                b.manual.append(ManualSession(id: idCell.exUUID ?? UUID(), category: category, note: r.cell(cells, "Note").exText,
+                b.manual.append(ManualSession(id: idCell.exUUID ?? UUID(), category: category, note: r.cell(cells, "Note").exRawText,
                                               countsAs: counts, segments: segments, isStopped: stopped != nil, createdAt: started))
             }
         }
@@ -150,7 +155,7 @@ extension ImportParser {
                 guard seconds > 0 else { reject(r.name, row, "hours/minutes must be greater than 0"); continue }
                 let idCell = r.cell(cells, "ID")
                 guard idCell.exIsEmpty || idCell.exUUID != nil else { reject(r.name, row, "bad ID '\(idCell.exText)'"); continue }
-                b.timeOff.append(.init(id: idCell.exUUID, day: day, typeName: type, seconds: seconds, note: r.cell(cells, "Note").exText))
+                b.timeOff.append(.init(id: idCell.exUUID, day: day, typeName: type, seconds: seconds, note: r.cell(cells, "Note").exRawText))
             }
         }
 
@@ -160,8 +165,8 @@ extension ImportParser {
                 guard let day = r.cell(cells, "Date", "Day").exDay(calendar: cal) else { reject(r.name, row, "missing or bad date"); continue }
                 let idCell = r.cell(cells, "ID")
                 guard idCell.exIsEmpty || idCell.exUUID != nil else { reject(r.name, row, "bad ID '\(idCell.exText)'"); continue }
-                let name = r.cell(cells, "Name", "Holiday").exText
-                b.holidays.append(Holiday(id: idCell.exUUID ?? UUID(), day: day, name: name.isEmpty ? "Holiday" : name))
+                let nameCell = r.cell(cells, "Name", "Holiday")
+                b.holidays.append(Holiday(id: idCell.exUUID ?? UUID(), day: day, name: nameCell.exIsEmpty ? "Holiday" : nameCell.exRawText))
             }
         }
 
@@ -233,7 +238,7 @@ extension ImportParser {
                 guard excusedCell.exIsEmpty || excusedCell.exBool != nil else { reject(r.name, row, "bad Excused flag"); continue }
                 b.overrides.append(DayOverride(id: idCell.exUUID ?? UUID(), day: day, kind: kind,
                                                countEarlyArrival: earlyCell.exBool ?? false, excused: excusedCell.exBool ?? false,
-                                               note: r.cell(cells, "Note").exText))
+                                               note: r.cell(cells, "Note").exRawText))
             }
         }
 
@@ -248,7 +253,7 @@ extension ImportParser {
                 if !secondsCell.exIsEmpty { seconds = secondsCell.exInt }
                 else { seconds = ExchangeFormat.seconds(hoursText: hoursCell.exText, minutesText: minutesCell.exText) }
                 guard let secs = seconds else { reject(r.name, row, "missing or bad Seconds/Hours"); continue }
-                b.adjustments.append(Adjustment(id: idCell.exUUID ?? UUID(), day: day, seconds: secs, reason: r.cell(cells, "Reason", "Note").exText))
+                b.adjustments.append(Adjustment(id: idCell.exUUID ?? UUID(), day: day, seconds: secs, reason: r.cell(cells, "Reason", "Note").exRawText))
             }
         }
 
@@ -317,6 +322,16 @@ extension ImportParser {
 
         b.invalid = invalid.sorted { $0.line < $1.line }
         return b
+    }
+
+    /// The `timeZoneIdentifier` row of the Settings sheet when the workbook has one that names a known zone.
+    static func workbookTimeZone(_ workbook: Workbook) -> TimeZone? {
+        guard let sheet = workbook.sheet(named: "Settings") else { return nil }
+        let r = SheetReader(sheet)
+        for (_, cells) in r.dataRows where r.cell(cells, "Key", "Setting").exText == "timeZoneIdentifier" {
+            return TimeZone(identifier: r.cell(cells, "Value").exText)
+        }
+        return nil
     }
 
     enum SettingOutcome { case applied, ignored, bad(String) }

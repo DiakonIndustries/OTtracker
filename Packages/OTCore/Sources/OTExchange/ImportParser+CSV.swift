@@ -21,11 +21,12 @@ extension ImportParser {
         func isBlank(_ row: [String]) -> Bool { row.allSatisfy { ExchangeFormat.trim($0).isEmpty } }
 
         // Holidays-only file.
-        if header == ["date", "name"] {
+        if isHolidaysHeader(header), let dateColumn = header.firstIndex(of: "date"), let nameColumn = header.firstIndex(of: "name") {
             for (i, row) in rows.enumerated().dropFirst() where !isBlank(row) {
                 let line = i + 1
-                guard let day = ExchangeFormat.parseDay(row[0], calendar: cal) else { reject(line, "line \(line): bad date '\(ExchangeFormat.trim(row[0]))'"); continue }
-                let name = row.count > 1 ? ExchangeFormat.trim(row[1]) : ""
+                let dateText = dateColumn < row.count ? ExchangeFormat.trim(row[dateColumn]) : ""
+                guard let day = ExchangeFormat.parseDay(dateText, calendar: cal) else { reject(line, "line \(line): bad date '\(dateText)'"); continue }
+                let name = nameColumn < row.count ? ExchangeFormat.trim(row[nameColumn]) : ""
                 b.holidays.append(Holiday(day: day, name: name.isEmpty ? "Holiday" : name))
             }
             return b

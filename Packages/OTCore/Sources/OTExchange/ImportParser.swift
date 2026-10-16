@@ -22,7 +22,7 @@ public enum ImportParser {
             return .xlsx
         }
         if let first = firstSignificantByte(data), first == 0x7B { return .json }
-        guard let text = decodeText(data) else { return nil }
+        guard looksLikeText(data), let text = decodeText(data) else { return nil }
         return csvKind(text)
     }
 
@@ -34,6 +34,12 @@ public enum ImportParser {
             let workbook: Workbook
             do { workbook = try XLSXReader.read(data, timeZone: store.settings.timeZone) }
             catch { throw ImportError.unreadable("Could not read the Excel file: \(error)") }
+            // Excel dates are wall-clock in the zone the file was written in (its Settings sheet). When the
+            // store is set to another zone, read the cells again in the file's zone so every instant is kept.
+            if let tz = workbookTimeZone(workbook), tz.identifier != store.settings.timeZoneIdentifier,
+               let reread = try? XLSXReader.read(data, timeZone: tz) {
+                return parse(workbook: reread, store: store)
+            }
             return parse(workbook: workbook, store: store)
         case .json:
             return try parse(json: data)
@@ -89,6 +95,12 @@ public enum ImportParser {
         return bytes.first { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }
     }
 
+    /// Text never carries control bytes other than tab, line feed, carriage return and form feed;
+    /// anything else (zip, image, random bytes) is binary even though Latin-1 would "decode" it.
+    static func looksLikeText(_ data: Data) -> Bool {
+        !data.contains { $0 < 0x20 && $0 != 0x09 && $0 != 0x0A && $0 != 0x0D && $0 != 0x0C }
+    }
+
     /// UTF-8 (BOM allowed) or, failing that, Latin-1 text.
     static func decodeText(_ data: Data) -> String? {
         if data.isEmpty { return "" }
@@ -96,8 +108,13 @@ public enum ImportParser {
     }
 
     static func csvKind(_ text: String) -> ImportFormat {
-        let header = headerOf(csvText: text)
-        return header == ["date", "name"] ? .holidaysCSV : .csv
+        isHolidaysHeader(headerOf(csvText: text)) ? .holidaysCSV : .csv
+    }
+
+    /// `date,name` in either order; empty (trailing-comma) columns do not count.
+    static func isHolidaysHeader(_ header: [String]) -> Bool {
+        let named = header.filter { !$0.isEmpty }
+        return named.count == 2 && Set(named) == ["date", "name"]
     }
 
     /// Normalised header fields of the first CSV record.

@@ -60,7 +60,8 @@ the valid rows still import.
 * **With an `id`** (a UUID the app wrote in an earlier export) the row updates that record even if
   its times changed. An unknown id falls back to content matching.
 * The preview shows, per kind: **new**, **updated** (matched but different), **unchanged**,
-  and **invalid** rows with line numbers and reasons.
+  and **invalid** rows with line numbers and reasons. The header is line 1; a quoted field that
+  spans several physical lines still counts as one line.
 * **Merge** (default) adds new rows and updates matched ones; nothing is deleted.
 * **Replace** first wipes every fact (presence, manual, time off, holidays, adjustments, locations,
   schedule, overrides, events) but keeps the settings and the built-in time-off types, then imports
@@ -75,6 +76,10 @@ date,name
 2026-11-26,Thanksgiving
 2026-12-25,Christmas
 ```
+
+The header may be written in any case or spacing (`Date, Name`), in either column order, and
+with a trailing empty column (`date,name,`). An empty name becomes `Holiday`. Rows match existing
+holidays by day.
 
 ## Full example
 
@@ -97,6 +102,30 @@ manual,2026-10-24,09:00,17:00,,Home work,regular,,,,remote day,
 presence,2026-11-01,22:00,01:30,Plant A,,,,,,night shift,
 adjustment,2026-11-05,,,,,,-1,30,,gave back time,
 ```
+
+## Importing the app's own Excel export
+
+The `.xlsx` the app writes imports back through the same preview. Sheets 3–12 (Presence, Manual,
+TimeOff, Holidays, Locations, Schedule, Overrides, Adjustments, Events, Settings) carry IDs, so an
+untouched export reports every row as unchanged; a cell edited in Excel reports that one row as
+updated. Things worth knowing:
+
+* Date cells are the wall clock of the time zone the file was written in (the `timeZoneIdentifier`
+  row of the Settings sheet). The importer reads them in that zone even if the app's time zone
+  setting has changed since, so every instant comes back exactly. One exception is inherent to
+  Excel dates: an instant inside the repeated hour of a fall-back night (01:00–01:59 on the first
+  Sunday of November in the US) has the same wall clock as the instant an hour earlier and comes
+  back as the first occurrence.
+* Free text (notes, reasons, holiday names, categories, location names) comes back exactly as
+  written, surrounding spaces included.
+* A location column that holds a UUID instead of a name (the export writes the ID when the
+  location has since been deleted) keeps that ID; no placeholder is created.
+* The workbook has no column for a location's or manual session's creation time, a schedule
+  version's note, or the dismissed Inbox items. After a Merge those keep the app's existing values
+  (or, into an empty store, the earliest time the file mentions the record / an empty note); the
+  JSON backup carries all of them.
+* Files from other programs (an openpyxl or Excel workbook with unrelated sheets, a zip that is not
+  a workbook, binary data) are reported as empty or unreadable, never imported by accident.
 
 ## Converting someone's spreadsheet (notes for an AI)
 
