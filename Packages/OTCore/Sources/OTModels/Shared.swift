@@ -69,16 +69,14 @@ public enum DeepLink: Hashable, Sendable {
         guard url.scheme == AppIdentifiers.urlScheme else { return nil }
         let host = url.host ?? ""
         let parts = [host] + url.pathComponents.filter { $0 != "/" }
-        switch parts {
-        case ["home"]: self = .home
-        case ["timer", "start"]: self = .timerStart
-        case ["timer", "pause"]: self = .timerPause
-        case ["timer", "resume"]: self = .timerResume
-        case ["timer", "stop"]: self = .timerStop
-        case ["inbox"]: self = .inbox
-        case ["log", let iso] where DayKey(iso: iso) != nil: self = .log(DayKey(iso: iso)!)
-        default: return nil
-        }
+        if parts == ["home"] { self = .home }
+        else if parts == ["timer", "start"] { self = .timerStart }
+        else if parts == ["timer", "pause"] { self = .timerPause }
+        else if parts == ["timer", "resume"] { self = .timerResume }
+        else if parts == ["timer", "stop"] { self = .timerStop }
+        else if parts == ["inbox"] { self = .inbox }
+        else if parts.count == 2, parts[0] == "log", let day = DayKey(iso: parts[1]) { self = .log(day) }
+        else { return nil }
     }
 }
 

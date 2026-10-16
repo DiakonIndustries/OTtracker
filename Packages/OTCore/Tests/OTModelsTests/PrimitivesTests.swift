@@ -116,3 +116,15 @@ final class PrimitivesTests: XCTestCase {
         XCTAssertEqual(m.activeSeconds(now: t0.addingTimeInterval(9999)), 600)
     }
 }
+
+final class DeepLinkTests: XCTestCase {
+    func testRoundTrip() {
+        let links: [DeepLink] = [.home, .timerStart, .timerPause, .timerResume, .timerStop, .inbox, .log(DayKey(year: 2026, month: 10, day: 14))]
+        for l in links {
+            XCTAssertEqual(DeepLink(url: l.url), l, "\(l.url)")
+        }
+        XCTAssertNil(DeepLink(url: URL(string: "ottracker://nope")!))
+        XCTAssertNil(DeepLink(url: URL(string: "https://example.com/inbox")!))
+        XCTAssertEqual(DeepLink.log(DayKey(year: 2026, month: 1, day: 2)).url.absoluteString, "ottracker://log/2026-01-02")
+    }
+}
