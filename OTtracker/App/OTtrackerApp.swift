@@ -3,26 +3,24 @@ import OTCore
 
 @main
 struct OTtrackerApp: App {
+    @State private var model = AppModel.live()
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some Scene {
         WindowGroup {
-            PlaceholderView()
+            RootView()
+                .environment(model)
+                .onOpenURL { url in model.handle(url: url) }
         }
-    }
-}
-
-/// Temporary first screen; replaced by the real root view once the app code lands.
-struct PlaceholderView: View {
-    private let store = Store()
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "clock.badge.checkmark")
-                .font(.system(size: 56))
-            Text("OTtracker")
-                .font(.largeTitle.bold())
-            Text("Grace \(store.settings.graceMinutes) min · week starts \(store.settings.weekStartsOn.name)")
-                .foregroundStyle(.secondary)
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active: model.sceneBecameActive()
+            case .background: model.sceneEnteredBackground()
+            default: break
+            }
         }
-        .padding()
+        .backgroundTask(.appRefresh(AppIdentifiers.refreshTaskID)) {
+            await model.performBackgroundRefresh()
+        }
     }
 }
