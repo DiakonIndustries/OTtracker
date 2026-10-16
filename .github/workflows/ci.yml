@@ -38,6 +38,7 @@ jobs:
   ios-build:
     name: iOS app build (simulator)
     runs-on: macos-latest
+    if: "!startsWith(github.event.head_commit.message, 'WIP')"
     steps:
       - uses: actions/checkout@v4
       - name: Select newest Xcode

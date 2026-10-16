@@ -39,7 +39,7 @@ enum SettingsImportErrorText {
         case "timeOffTypes": return "Time-off types"
         case "leaveBalances": return "Leave balances"
         case "settings": return "Settings"
-        default: return kind.prefix(1).uppercased() + kind.dropFirst()
+        default: return kind.prefix(1).uppercased() + String(kind.dropFirst())
         }
     }
 }

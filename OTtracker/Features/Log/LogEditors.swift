@@ -512,7 +512,7 @@ struct AdjustmentEditorView: View {
         existing = adjustment
         self.onDone = onDone
         _day = State(initialValue: adjustment?.day ?? defaultDay)
-        _sign = State(initialValue: (adjustment?.seconds ?? 0) < 0 ? .subtract : .add)
+        _sign = State(initialValue: (adjustment?.seconds ?? 0) < 0 ? LogAdjustmentSign.subtract : LogAdjustmentSign.add)
         _seconds = State(initialValue: adjustment.map { abs($0.seconds) } ?? 3600)
         _reason = State(initialValue: adjustment?.reason ?? "")
     }

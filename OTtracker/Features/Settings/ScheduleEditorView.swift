@@ -183,23 +183,25 @@ struct SettingsWeekdayRow: View {
     let day: DayKey
 
     var body: some View {
-        Toggle(weekday.name, isOn: $schedule.isWorkday)
-        if schedule.isWorkday {
-            DatePicker("Start", selection: timeBinding($schedule.start), displayedComponents: .hourAndMinute)
-                .environment(\.calendar, calendar)
-                .environment(\.timeZone, calendar.timeZone)
-            DatePicker("End", selection: timeBinding($schedule.end), displayedComponents: .hourAndMinute)
-                .environment(\.calendar, calendar)
-                .environment(\.timeZone, calendar.timeZone)
-            Stepper(value: $schedule.unpaidBreakMinutes, in: 0...120, step: 15) {
-                ValueRow("Unpaid break", "\(schedule.unpaidBreakMinutes) min")
-            }
-            if !schedule.isValid {
-                Text("Start must be before end.")
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            } else {
-                ValueRow("Expected", Format.hm(schedule.expectedSeconds))
+        Group {
+            Toggle(weekday.name, isOn: $schedule.isWorkday)
+            if schedule.isWorkday {
+                DatePicker("Start", selection: timeBinding($schedule.start), displayedComponents: .hourAndMinute)
+                    .environment(\.calendar, calendar)
+                    .environment(\.timeZone, calendar.timeZone)
+                DatePicker("End", selection: timeBinding($schedule.end), displayedComponents: .hourAndMinute)
+                    .environment(\.calendar, calendar)
+                    .environment(\.timeZone, calendar.timeZone)
+                Stepper(value: $schedule.unpaidBreakMinutes, in: 0...120, step: 15) {
+                    ValueRow("Unpaid break", "\(schedule.unpaidBreakMinutes) min")
+                }
+                if !schedule.isValid {
+                    Text("Start must be before end.")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                } else {
+                    ValueRow("Expected", Format.hm(schedule.expectedSeconds))
+                }
             }
         }
     }

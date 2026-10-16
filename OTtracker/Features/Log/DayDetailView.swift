@@ -45,8 +45,8 @@ enum LogText {
 
     /// "7:02 AM – 5:42 PM", or "since 7:02 AM" while still there.
     static func presenceRange(_ s: PresenceSession, _ cal: Calendar) -> String {
-        guard let exit = s.exitedAt else { return "since \(Format.time(s.enteredAt, cal))" }
-        return range(s.enteredAt, exit, cal)
+        guard let left = s.exitedAt else { return "since \(Format.time(s.enteredAt, cal))" }
+        return range(s.enteredAt, left, cal)
     }
 }
 
