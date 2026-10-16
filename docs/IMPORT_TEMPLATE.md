@@ -62,10 +62,11 @@ the valid rows still import.
 * The preview shows, per kind: **new**, **updated** (matched but different), **unchanged**,
   and **invalid** rows with line numbers and reasons. The header is line 1; a quoted field that
   spans several physical lines still counts as one line.
-* **Merge** (default) adds new rows and updates matched ones; nothing is deleted.
+* **Merge** (default) adds new rows and updates matched ones; nothing is deleted, and this phone's
+  settings (grace, categories, time zone, export email) are never changed by a merge.
 * **Replace** first wipes every fact (presence, manual, time off, holidays, adjustments, locations,
-  schedule, overrides, events) but keeps the settings and the built-in time-off types, then imports
-  the file. Needs explicit confirmation in the app.
+  schedule, overrides, events) but keeps the built-in time-off types, then imports the file. When the
+  file is the app's own Excel or JSON, its settings come back too. Needs explicit confirmation in the app.
 
 ## Holidays-only file
 

@@ -92,7 +92,7 @@ final class RoundTripTests: XCTestCase {
             XCTAssertEqual(c.updated, 0, "\(key).updated")
             XCTAssertEqual(c.unchanged, RichFixture.counts[key]!, "\(key).unchanged")
         }
-        XCTAssertEqual(plan.counts["settings"], ImportPlan.Counts(unchanged: 1))
+        XCTAssertNil(plan.counts["settings"], "a Merge never touches settings")
         XCTAssertEqual(plan.newLocationNames, [])
         XCTAssertEqual(plan.newTimeOffTypeNames, [])
         XCTAssertEqual(plan.totalNew + plan.totalUpdated, 0)
@@ -243,7 +243,12 @@ final class RoundTripTests: XCTestCase {
             XCTAssertEqual(plan.counts[key]?.new, 0, key)
             XCTAssertEqual(plan.counts[key]?.updated, 0, key)
         }
-        XCTAssertEqual(plan.counts["settings"], ImportPlan.Counts(updated: 1))   // the file's zone comes back with its settings
+        XCTAssertNil(plan.counts["settings"])   // a Merge keeps this phone's settings (and its zone)
+        var replaced = moved
+        let replacePlan = Importer.plan(store: moved, bundle: bundle, mode: .replace)
+        XCTAssertEqual(replacePlan.counts["settings"], ImportPlan.Counts(new: 1))
+        Importer.apply(plan: replacePlan, mode: .replace, to: &replaced)
+        XCTAssertEqual(replaced.settings.timeZoneIdentifier, "America/New_York")   // a Replace restores the file's settings
 
         // An already-read Workbook (dates are instants) still resolves text dates in the file's zone.
         var wb = try XLSXReader.read(data, timeZone: RichFixture.timeZone)

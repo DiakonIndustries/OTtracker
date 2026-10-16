@@ -73,7 +73,7 @@ final class JSONBackupTests: XCTestCase {
         let again = Importer.plan(store: target, bundle: bundle, mode: .merge)
         XCTAssertEqual(again.totalNew, 0)
         XCTAssertEqual(again.totalUpdated, 0)
-        XCTAssertEqual(again.totalUnchanged, RichFixture.counts.values.reduce(0, +) + 1)   // + settings
+        XCTAssertEqual(again.totalUnchanged, RichFixture.counts.values.reduce(0, +))
         Importer.apply(plan: again, mode: .merge, to: &target)
         XCTAssertEqual(target, after)
     }
@@ -104,7 +104,10 @@ final class JSONBackupTests: XCTestCase {
 
         var target = Store(settings: RichFixture.settings)
         Importer.apply(plan: Importer.plan(store: target, bundle: bundle, mode: .replace), mode: .replace, to: &target)
-        XCTAssertEqual(target, expected)
+        // What was decoded is this app's schema, so the restored store is stamped with it.
+        var stamped = expected
+        stamped.schemaVersion = Store.currentSchemaVersion
+        XCTAssertEqual(target, stamped)
     }
 
     func testOlderBackupsWithMissingCollectionsAndNumericDatesStillLoad() throws {

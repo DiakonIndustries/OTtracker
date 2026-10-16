@@ -27,7 +27,7 @@ final class MergeSemanticsTests: XCTestCase {
             XCTAssertEqual(c.new, key == kind ? new : 0, "\(key).new", file: file, line: line)
             XCTAssertEqual(c.updated, key == kind ? updated : 0, "\(key).updated", file: file, line: line)
         }
-        XCTAssertEqual(plan.counts["settings"], ImportPlan.Counts(unchanged: 1), file: file, line: line)
+        XCTAssertNil(plan.counts["settings"], "a Merge never touches settings", file: file, line: line)
     }
 
     func testSameFileImportedTwiceIsANoOp() throws {
@@ -42,8 +42,8 @@ final class MergeSemanticsTests: XCTestCase {
         let second = try plan(data, store: target)
         XCTAssertEqual(second.totalNew, 0)
         XCTAssertEqual(second.totalUpdated, 0)
-        XCTAssertEqual(second.totalUnchanged, RichFixture.counts.values.reduce(0, +) + 1)   // + settings
-        XCTAssertEqual(second.counts["settings"], ImportPlan.Counts(unchanged: 1))
+        XCTAssertEqual(second.totalUnchanged, RichFixture.counts.values.reduce(0, +))
+        XCTAssertNil(second.counts["settings"], "a Merge never touches settings")
         Importer.apply(plan: second, mode: .merge, to: &target)
         XCTAssertEqual(target, after)
     }
@@ -243,11 +243,11 @@ final class MergeSemanticsTests: XCTestCase {
         let empty = Importer.plan(store: store, bundle: ImportBundle(), mode: .merge)
         XCTAssertEqual(Set(empty.counts.keys), Set(ImportPlan.countKeys))
         let xlsx = try plan(try RichFixture.xlsx(store: store), store: store)
-        XCTAssertEqual(Set(xlsx.counts.keys), Set(ImportPlan.countKeys + ["settings"]))   // plus settings when the file has them
+        XCTAssertEqual(Set(xlsx.counts.keys), Set(ImportPlan.countKeys))                   // a Merge ignores the file's settings
         let json = Importer.plan(store: store, bundle: try ImportParser.parse(json: ExportBuilder.json(store: store)), mode: .merge)
-        XCTAssertEqual(Set(json.counts.keys), Set(ImportPlan.countKeys + ["settings"]))
+        XCTAssertEqual(Set(json.counts.keys), Set(ImportPlan.countKeys))
         let replace = Importer.plan(store: store, bundle: try ImportParser.parse(json: ExportBuilder.json(store: store)), mode: .replace)
-        XCTAssertEqual(Set(replace.counts.keys), Set(ImportPlan.countKeys + ["settings"]))
+        XCTAssertEqual(Set(replace.counts.keys), Set(ImportPlan.countKeys + ["settings"]))   // a Replace carries them
     }
 
     func testPlanNeverMutatesTheStore() throws {

@@ -28,7 +28,7 @@ final class ImporterTests: XCTestCase {
         let plan = Importer.plan(store: store, bundle: bundle, mode: .merge)
         XCTAssertEqual(plan.invalid, [])
         assertCounts(plan, new: { _ in 0 }, updated: { _ in 0 }, unchanged: { fixtureCounts[$0]! })
-        XCTAssertEqual(plan.counts["settings"], ImportPlan.Counts(new: 0, updated: 0, unchanged: 1))
+        XCTAssertNil(plan.counts["settings"], "a Merge never touches settings")
         XCTAssertEqual(plan.newLocationNames, [])
         XCTAssertEqual(plan.newTimeOffTypeNames, [])
         XCTAssertEqual(plan.totalNew, 0)
@@ -309,7 +309,7 @@ final class ImporterTests: XCTestCase {
         let bundle = try ImportParser.parse(json: ExportBuilder.json(store: store))
         let plan = Importer.plan(store: store, bundle: bundle, mode: .merge)
         assertCounts(plan, new: { _ in 0 }, updated: { _ in 0 }, unchanged: { fixtureCounts[$0]! })
-        XCTAssertEqual(plan.counts["settings"], ImportPlan.Counts(unchanged: 1))
+        XCTAssertNil(plan.counts["settings"], "a Merge never touches settings")
         var target = store
         Importer.apply(plan: plan, mode: .merge, to: &target)
         XCTAssertEqual(target, store)
@@ -330,14 +330,20 @@ final class ImporterTests: XCTestCase {
 
     // MARK: Settings
 
-    func testSettingsAreCountedAndApplied() {
+    func testSettingsAreAppliedOnReplaceOnly() {
         var store = Fixtures.store()
         var bundle = ImportParser.parse(workbook: Fixtures.workbook(store: store), store: store)
         bundle.settings?.graceMinutes = 12
-        let plan = Importer.plan(store: store, bundle: bundle, mode: .merge)
-        XCTAssertEqual(plan.counts["settings"], ImportPlan.Counts(updated: 1))
-        Importer.apply(plan: plan, mode: .merge, to: &store)
-        XCTAssertEqual(store.settings.graceMinutes, 12)
+        let mergePlan = Importer.plan(store: store, bundle: bundle, mode: .merge)
+        XCTAssertNil(mergePlan.counts["settings"])
+        var merged = store
+        Importer.apply(plan: mergePlan, mode: .merge, to: &merged)
+        XCTAssertEqual(merged.settings, store.settings)              // a Merge keeps this phone's settings
+
+        let replacePlan = Importer.plan(store: store, bundle: bundle, mode: .replace)
+        XCTAssertEqual(replacePlan.counts["settings"], ImportPlan.Counts(new: 1))
+        Importer.apply(plan: replacePlan, mode: .replace, to: &store)
+        XCTAssertEqual(store.settings.graceMinutes, 12)              // a Replace restores the file's settings
 
         let csvPlan = Importer.plan(store: store, bundle: ImportParser.parse(csvText: ExportBuilder.csvTemplate(), store: store), mode: .merge)
         XCTAssertNil(csvPlan.counts["settings"])

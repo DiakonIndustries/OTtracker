@@ -62,6 +62,9 @@ enum MergeEngine {
         tally.forceNew = mode == .replace
         if mode == .replace, let full = bundle.fullStore {
             store = full
+            // A backup from a newer app may carry a higher schema number; what was decoded is
+            // this app's schema, so it is stamped as such.
+            store.schemaVersion = min(full.schemaVersion, Store.currentSchemaVersion)
             for _ in full.presence { tally.add("presence", .new) }
             for _ in full.manual { tally.add("manual", .new) }
             for _ in full.timeOff { tally.add("timeOff", .new) }
@@ -193,7 +196,9 @@ enum MergeEngine {
             }
         }
 
-        if let settings = bundle.settings {
+        // Settings travel with a Replace only: a Merge adds records, it never changes how this
+        // phone is configured (grace, categories, time zone, export email, onboarding state).
+        if mode == .replace, let settings = bundle.settings {
             tally.add("settings", settings == store.settings ? .unchanged : .updated)
             store.settings = settings
         }
