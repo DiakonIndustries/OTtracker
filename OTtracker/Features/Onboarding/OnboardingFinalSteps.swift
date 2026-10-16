@@ -98,6 +98,12 @@ struct OnboardingBalanceStep: View {
     @Binding var seconds: Int
     @Binding var asOf: Date?
 
+    init(isPositive: Binding<Bool>, seconds: Binding<Int>, asOf: Binding<Date?>) {
+        _isPositive = isPositive
+        _seconds = seconds
+        _asOf = asOf
+    }
+
     private var signedSeconds: Int { isPositive ? seconds : -seconds }
 
     /// Noon today in the store's calendar, so a date-only pick lands on the intended day.
@@ -152,6 +158,12 @@ struct OnboardingDoneStep: View {
     let startingBalanceSeconds: Int
     let startingAsOf: DayKey
     let writesBalance: Bool
+
+    init(startingBalanceSeconds: Int, startingAsOf: DayKey, writesBalance: Bool) {
+        self.startingBalanceSeconds = startingBalanceSeconds
+        self.startingAsOf = startingAsOf
+        self.writesBalance = writesBalance
+    }
 
     var body: some View {
         Form {
