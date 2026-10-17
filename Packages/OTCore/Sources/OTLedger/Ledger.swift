@@ -270,7 +270,9 @@ public enum Ledger {
             previous = boundary
             k += 1
         }
-        return grants * rule.seconds
+        // Saturate instead of trapping on absurd (imported) rules.
+        let (total, overflow) = grants.multipliedReportingOverflow(by: rule.seconds)
+        return overflow ? (rule.seconds < 0 ? Int.min : Int.max) : total
     }
 
     // MARK: - Internals
@@ -283,6 +285,9 @@ public enum Ledger {
         /// Index into `store.presence`; nil for a regular manual segment.
         var presenceIndex: Int?
         var locationID: UUID?
+        /// Tiebreak for pieces with identical instants: the session's UUID, so results depend on the
+        /// facts and never on the order of `store.presence`. Manual segments sort first ("").
+        var key: String
     }
 
     /// A merged (union) presence interval that remembers where it started and which piece it ends with.
@@ -415,22 +420,25 @@ public enum Ledger {
             let clipped = s.interval(now: now).clipped(to: dayInterval)
             if s.isOpen, clipped != nil || (s.enteredAt >= dayStart && s.enteredAt < dayEnd) { openPresence = true }
             if let c = clipped {
-                pieces.append(Piece(interval: c, enteredAt: s.enteredAt, presenceIndex: i, locationID: s.locationID))
+                pieces.append(Piece(interval: c, enteredAt: s.enteredAt, presenceIndex: i, locationID: s.locationID, key: s.id.uuidString))
             }
         }
         if openPresence { flags.append(.openPresence) }
 
         // Overlapping locations: the later `enteredAt` wins from its start (SPEC 4.7).
-        pieces.sort { ($0.enteredAt, $0.interval.start, $0.presenceIndex ?? -1) < ($1.enteredAt, $1.interval.start, $1.presenceIndex ?? -1) }
+        pieces.sort { ($0.enteredAt, $0.interval.start, $0.key) < ($1.enteredAt, $1.interval.start, $1.key) }
         var overlapping = false
         if pieces.count > 1 {
             for i in 0..<(pieces.count - 1) {
                 for j in (i + 1)..<pieces.count where pieces[j].locationID != pieces[i].locationID {
-                    if pieces[j].interval.start < pieces[i].interval.end {
-                        pieces[i].interval = Interval(start: pieces[i].interval.start, end: pieces[j].interval.start)
-                        overlapping = true
-                    }
-                    break // later pieces start no earlier than this one
+                    // Later pieces start no earlier than this one, so the first that does not overlap ends the search.
+                    guard pieces[j].interval.start < pieces[i].interval.end else { break }
+                    overlapping = true
+                    // Two arrivals at the same instant have no "later" one: neither is cut, both merge.
+                    // Otherwise the result would depend on the order of `store.presence`.
+                    guard pieces[j].enteredAt > pieces[i].enteredAt else { continue }
+                    pieces[i].interval = Interval(start: pieces[i].interval.start, end: pieces[j].interval.start)
+                    break
                 }
             }
             pieces.removeAll { $0.interval.isEmpty }
@@ -446,7 +454,7 @@ public enum Ledger {
                 guard let c = seg.interval(now: now).clipped(to: dayInterval) else { continue }
                 if m.countsAs == .regular {
                     regular.append(c)
-                    pieces.append(Piece(interval: c, enteredAt: c.start, presenceIndex: nil, locationID: nil))
+                    pieces.append(Piece(interval: c, enteredAt: c.start, presenceIndex: nil, locationID: nil, key: ""))
                 } else {
                     extra.append(c)
                 }
@@ -456,7 +464,7 @@ public enum Ledger {
         let manualExtra = Interval.totalSeconds(extra)
 
         // Merge into blocks (union), remembering start location and the piece each block ends with.
-        pieces.sort { ($0.interval.start, $0.enteredAt, $0.presenceIndex ?? -1) < ($1.interval.start, $1.enteredAt, $1.presenceIndex ?? -1) }
+        pieces.sort { ($0.interval.start, $0.enteredAt, $0.key) < ($1.interval.start, $1.enteredAt, $1.key) }
         var blocks: [Block] = []
         for p in pieces {
             if var last = blocks.last, p.interval.start <= last.end {
