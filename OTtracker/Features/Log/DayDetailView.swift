@@ -97,6 +97,10 @@ struct DayDetailView: View {
     @State private var pendingDelete: LogDeleteTarget?
     @State private var customHoursExpanded = false
     @State private var rawEventsExpanded = false
+    /// Local draft of the day note; committed on submit, focus loss and disappear so each keystroke
+    /// does not run a full ledger recompute, a Live Activity update and a widget reload.
+    @State private var note = ""
+    @FocusState private var noteFocused: Bool
 
     init(day: DayKey) {
         self.day = day
@@ -135,7 +139,13 @@ struct DayDetailView: View {
         }
         .onAppear {
             if customSchedule != nil { customHoursExpanded = true }
+            note = dayOverride.note
         }
+        .onChange(of: dayOverride.note) { _, new in
+            // Model -> local (e.g. "Remove override" cleared it), so a stale commit cannot bring it back.
+            if new != note { note = new }
+        }
+        .onDisappear(perform: commitNote)
     }
 
     // MARK: Header
@@ -192,7 +202,12 @@ struct DayDetailView: View {
                         .foregroundStyle(Color.negative)
                 }
             }
-            TextField("Note for this day", text: noteBinding)
+            TextField("Note for this day", text: $note)
+                .focused($noteFocused)
+                .onSubmit(commitNote)
+                .onChange(of: noteFocused) { _, focused in
+                    if !focused { commitNote() }
+                }
             if hasOverride {
                 Button("Remove override", role: .destructive) {
                     pendingDelete = .dayOverride(day)
@@ -299,8 +314,11 @@ struct DayDetailView: View {
         )
     }
 
-    private var noteBinding: Binding<String> {
-        Binding(get: { dayOverride.note }, set: { v in updateOverride { $0.note = v } })
+    /// Writes the local note through the model once it differs. `Store.setOverride` drops an override
+    /// that ends up empty, so committing a cleared note still removes it.
+    private func commitNote() {
+        guard note != dayOverride.note else { return }
+        updateOverride { $0.note = note }
     }
 
     // MARK: Breakdown

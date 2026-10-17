@@ -169,10 +169,11 @@ struct TimeOffEditorView: View {
         return "No schedule on \(dayText); a full day counts as 8h 30m."
     }
 
-    /// Bank balance with this entry's own flex hours added back when it is already counted.
+    /// Settled bank balance (through yesterday) with this entry's own flex hours added back when it is
+    /// already inside that figure; today's own entry is not, because today's delta is provisional.
     private var bankAvailable: Int {
-        var bank = model.summary.balanceSeconds
-        if let existing = entry, existing.day <= model.today,
+        var bank = model.settledBalanceSeconds
+        if let existing = entry, existing.day < model.today,
            let oldType = model.store.timeOffType(id: existing.typeID), oldType.deductsFromBank {
             bank += existing.seconds
         }

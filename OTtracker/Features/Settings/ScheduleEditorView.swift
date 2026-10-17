@@ -45,7 +45,9 @@ struct ScheduleEditorView: View {
         self.onDone = onDone
         // The placeholder date only seeds the seven weekday entries; the real "effective from" is today (see effectiveDate).
         let template = version ?? ScheduleVersion.standardWeek(effectiveFrom: DayKey(year: 2000, month: 1, day: 1))
-        _days = State(initialValue: template.days)
+        // Always exactly 7 entries: a decoded version (backup / import) bypasses the memberwise padding,
+        // and the editor indexes `days[weekday.rawValue - 1]`.
+        _days = State(initialValue: Array((template.days + Array(repeating: WeekdaySchedule.off, count: 7)).prefix(7)))
         _note = State(initialValue: template.note)
     }
 

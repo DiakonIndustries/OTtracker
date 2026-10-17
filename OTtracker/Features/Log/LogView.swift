@@ -189,7 +189,7 @@ struct LogView: View {
             }
             path = [DayKey(session.startedAt ?? session.createdAt, calendar: cal)]
             sheet = .manual(session)
-        case .exportMonth, .locations, .importFile:
+        case .exportMonth, .locations, .importFile, .export:
             // Not ours; another feature consumes these.
             return
         }

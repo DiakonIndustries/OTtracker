@@ -85,7 +85,7 @@ struct TimeOffView: View {
     private var bankSection: some View {
         Section {
             LabeledContent("Flex time available") {
-                DeltaText(seconds: model.summary.balanceSeconds, font: .title3)
+                DeltaText(seconds: model.settledBalanceSeconds, font: .title3)
             }
             Button {
                 editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: .flex)

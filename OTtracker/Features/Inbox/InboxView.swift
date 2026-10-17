@@ -184,7 +184,7 @@ struct InboxView: View {
         case .exportMonth(let month, let email):
             model.consumeRoute()
             presentExport(month: month, email: email)
-        case .day, .editPresence, .editManual, .locations, .importFile:
+        case .day, .editPresence, .editManual, .locations, .importFile, .export:
             break
         }
     }

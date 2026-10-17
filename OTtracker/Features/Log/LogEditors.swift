@@ -337,7 +337,7 @@ struct ManualSessionEditorView: View {
                     }
                 }
             }
-            .navigationTitle(existing == nil ? "Work elsewhere" : "Edit work elsewhere")
+            .navigationTitle(existing == nil ? (countsAs == .regular ? "Hours worked" : "Work elsewhere") : "Edit work elsewhere")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -449,8 +449,14 @@ struct ManualSessionEditorView: View {
             }
         } else {
             let cal = model.calendar
-            start = TimeOfDay(hour: 17).date(on: defaultDay, calendar: cal)
-            end = TimeOfDay(hour: 18).date(on: defaultDay, calendar: cal)
+            if countsAs == .regular, let window = model.dayResult(for: defaultDay).scheduledWindow {
+                // Inbox "Enter hours" on a no-show: regular time should fill the scheduled window, like PresenceEditorView.
+                start = window.start
+                end = window.end
+            } else {
+                start = TimeOfDay(hour: 17).date(on: defaultDay, calendar: cal)
+                end = TimeOfDay(hour: 18).date(on: defaultDay, calendar: cal)
+            }
             let preferred = model.settings.defaultManualCategory
             if categories.contains(preferred) {
                 categoryChoice = preferred
@@ -501,6 +507,9 @@ struct AdjustmentEditorView: View {
 
     private let existing: Adjustment?
     private let onDone: (() -> Void)?
+    /// Hours wheel ceiling: at least a day, and always above a stored amount (a carry-over can exceed 24 h),
+    /// otherwise the wheel shows no selection and the first touch silently rewrites the amount.
+    private let maxHours: Int
 
     @State private var day: DayKey
     @State private var sign: LogAdjustmentSign
@@ -511,6 +520,7 @@ struct AdjustmentEditorView: View {
     init(adjustment: Adjustment?, defaultDay: DayKey, onDone: (() -> Void)? = nil) {
         existing = adjustment
         self.onDone = onDone
+        maxHours = max(24, (adjustment.map { abs($0.seconds) } ?? 0) / 3600 + 1)
         _day = State(initialValue: adjustment?.day ?? defaultDay)
         _sign = State(initialValue: (adjustment?.seconds ?? 0) < 0 ? LogAdjustmentSign.subtract : LogAdjustmentSign.add)
         _seconds = State(initialValue: adjustment.map { abs($0.seconds) } ?? 3600)
@@ -533,7 +543,7 @@ struct AdjustmentEditorView: View {
                     .pickerStyle(.segmented)
                 }
                 Section("Amount") {
-                    DurationPicker(seconds: $seconds)
+                    DurationPicker(seconds: $seconds, maxHours: maxHours)
                     LabeledContent("Applied to balance") {
                         DeltaText(seconds: signedSeconds)
                     }

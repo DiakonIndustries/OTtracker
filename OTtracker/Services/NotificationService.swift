@@ -17,6 +17,8 @@ final class NotificationService: NSObject, NotificationServicing, UNUserNotifica
     }
 
     static let timerNudgeIdentifier = "timer-nudge"
+    /// Stable per-session id so a later exit for the same session replaces the delivered card and a flap reopen can remove it.
+    static func exitIdentifier(_ sessionID: UUID) -> String { "exit-\(sessionID.uuidString)" }
 
     override init() {
         super.init()
@@ -51,6 +53,11 @@ final class NotificationService: NSObject, NotificationServicing, UNUserNotifica
         isAuthorized = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
     }
 
+    func authorizationStatus() async -> Bool {
+        await refreshAuthorization()
+        return isAuthorized
+    }
+
     func requestAuthorization() async -> Bool {
         do {
             let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
@@ -72,6 +79,7 @@ final class NotificationService: NSObject, NotificationServicing, UNUserNotifica
             content.categoryIdentifier = Category.exit.rawValue
             content.userInfo = ["sessionID": sessionID.uuidString]
             content.threadIdentifier = "exits"
+            identifier = NotificationService.exitIdentifier(sessionID)
         case .earlyArrival(let day, let title, let body):
             content.title = title; content.body = body
             content.categoryIdentifier = Category.early.rawValue
@@ -109,6 +117,12 @@ final class NotificationService: NSObject, NotificationServicing, UNUserNotifica
     func cancelTimerNudge() {
         center.removePendingNotificationRequests(withIdentifiers: [NotificationService.timerNudgeIdentifier])
         center.removeDeliveredNotifications(withIdentifiers: [NotificationService.timerNudgeIdentifier])
+    }
+
+    func cancelExitNotification(sessionID: UUID) {
+        let id = NotificationService.exitIdentifier(sessionID)
+        center.removePendingNotificationRequests(withIdentifiers: [id])
+        center.removeDeliveredNotifications(withIdentifiers: [id])
     }
 
     // MARK: UNUserNotificationCenterDelegate
@@ -153,6 +167,8 @@ final class NoopNotificationService: NotificationServicing {
     var isAuthorized = false
     var onResponse: ((NotificationResponse) -> Void)?
     func requestAuthorization() async -> Bool { false }
+    func authorizationStatus() async -> Bool { false }
     func post(_ notification: AppNotification) {}
     func cancelTimerNudge() {}
+    func cancelExitNotification(sessionID: UUID) {}
 }

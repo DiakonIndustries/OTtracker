@@ -273,6 +273,10 @@ struct SettingsView: View {
             model.selectedTab = .settings
             path = [.importFile]
             model.consumeRoute()
+        case .export:
+            model.selectedTab = .settings
+            path = [.export]
+            model.consumeRoute()
         default:
             break
         }

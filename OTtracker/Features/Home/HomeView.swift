@@ -38,6 +38,7 @@ struct HomeView: View {
                     Menu {
                         Button {
                             model.selectedTab = .settings
+                            model.pendingRoute = .export
                         } label: {
                             Label("Export…", systemImage: "square.and.arrow.up")
                         }

@@ -16,6 +16,9 @@ struct TimeOffBalanceEditor: View {
     @State private var accrualSeconds = 0
     @State private var period: AccrualPeriod = .monthly
     @State private var anchor = DayKey(year: 2000, month: 1, day: 1)
+    /// Wheel ceilings, raised above a stored value so an imported large amount never leaves the hours wheel without a selection.
+    @State private var startingMaxHours = 500
+    @State private var accrualMaxHours = 100
 
     /// Configs created by `Store()` carry this placeholder; shown as Jan 1 of this year instead.
     private static let placeholderDay = DayKey(year: 2000, month: 1, day: 1)
@@ -27,7 +30,7 @@ struct TimeOffBalanceEditor: View {
     var body: some View {
         Form {
             Section {
-                DurationPicker(seconds: $startingSeconds, maxHours: 500)
+                DurationPicker(seconds: $startingSeconds, maxHours: startingMaxHours)
                 DatePicker("As of", selection: TimeOffDates.dateBinding($asOf, calendar: model.calendar), displayedComponents: .date)
                     .environment(\.calendar, model.calendar)
                     .environment(\.timeZone, model.calendar.timeZone)
@@ -40,7 +43,7 @@ struct TimeOffBalanceEditor: View {
             Section {
                 Toggle("Accrues automatically", isOn: $accrues)
                 if accrues {
-                    DurationPicker(seconds: $accrualSeconds, maxHours: 100)
+                    DurationPicker(seconds: $accrualSeconds, maxHours: accrualMaxHours)
                     Picker("Period", selection: $period) {
                         ForEach(AccrualPeriod.allCases, id: \.self) { p in
                             Text(TimeOffFormat.periodLabel(p)).tag(p)
