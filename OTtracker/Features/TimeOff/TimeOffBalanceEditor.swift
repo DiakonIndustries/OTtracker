@@ -117,10 +117,12 @@ struct TimeOffBalanceEditor: View {
         let thisYear = DayKey(year: model.today.year, month: 1, day: 1)
         if let config = model.store.leaveBalances.first(where: { $0.typeID == typeID }) {
             startingSeconds = config.startingSeconds
+            startingMaxHours = max(500, max(0, config.startingSeconds) / 3600 + 1)
             asOf = config.asOf <= TimeOffBalanceEditor.placeholderDay ? thisYear : config.asOf
             if let rule = config.accrual {
                 accrues = true
                 accrualSeconds = rule.seconds
+                accrualMaxHours = max(100, max(0, rule.seconds) / 3600 + 1)
                 period = rule.period
                 anchor = rule.anchor
             } else {
