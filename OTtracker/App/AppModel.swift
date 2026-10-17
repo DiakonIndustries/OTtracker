@@ -362,16 +362,15 @@ final class AppModel {
     // MARK: Geofence events
 
     private func handle(crossing: RegionCrossing) {
-        if crossing.inferredFromState {
-            let open = store.openPresenceSession
-            switch crossing.kind {
-            case .enter:
-                if let open, open.locationID == crossing.locationID { return }
-            case .exit:
-                guard let open, open.locationID == crossing.locationID else { return }
-            }
-        }
         guard store.location(id: crossing.locationID) != nil else { return }
+        if crossing.inferredFromState {
+            // `didDetermineState` fires after `requestState` and on every real boundary transition (right
+            // before didEnter/didExit), stamped with the observation time, not a crossing time. A probe may
+            // open a missed arrival, but it must never close a session: the real departure time is unknown
+            // (a missed exit surfaces as the `stale:` Inbox item, and the real `didExitRegion` still closes).
+            guard crossing.kind == .enter else { return }
+            if let open = store.openPresenceSession, open.locationID == crossing.locationID { return }
+        }
         let event = LocationEvent(locationID: crossing.locationID, kind: crossing.kind, at: crossing.at, source: .geofence)
         var outcome: InterpretationOutcome? = nil
         mutate { s in outcome = GeofenceInterpreter.apply(event, to: &s) }
@@ -380,25 +379,39 @@ final class AppModel {
     }
 
     private func notify(after outcome: InterpretationOutcome) {
-        let name = locationName(outcome.event.locationID)
         if let closed = outcome.closed, let exit = closed.exitedAt {
+            // Name the location that was left (on a switch, `event.locationID` is the one entered), and take
+            // the amount from the same source as the Inbox `exit:` item so both agree (SPEC 5.3).
+            let leftName = locationName(closed.locationID)
             let r = dayResult(for: DayKey(exit, calendar: calendar))
-            if r.extraAfterSeconds > 0 || r.earlyExitSeconds > 0 {
-                let effect = r.extraAfterSeconds > 0 ? r.extraAfterSeconds : -r.earlyExitSeconds
+            if let effect = InboxEngine.exitEffectSeconds(for: closed, dayResult: r, store: store, now: now), effect != 0 {
                 notifications.post(.exitPosted(sessionID: closed.id,
-                                               title: "Left \(name) at \(Format.time(exit, calendar))",
+                                               title: "Left \(leftName) at \(Format.time(exit, calendar))",
                                                body: "\(Format.hm(effect, signed: true)) logged. Balance now \(Format.hm(summary.balanceSeconds, signed: true))."))
             }
         }
         if let opened = outcome.opened {
-            let day = DayKey(opened.enteredAt, calendar: calendar)
-            let r = dayResult(for: day)
-            if r.flags.contains(.earlyArrivalUncounted), r.extraBeforeSeconds > 0 {
-                notifications.post(.earlyArrival(day: day, title: "Arrived \(Format.hm(r.extraBeforeSeconds)) early",
-                                                 body: "Early arrivals do not count unless you say so. Count it toward your balance?"))
+            if outcome.reopened {
+                // The flap filter undid the exit: take back the "Left X: +42m logged" card it produced.
+                notifications.cancelExitNotification(sessionID: opened.id)
+            } else {
+                // Derived from the facts: right after the enter the open session has ~0 s before S, so the
+                // day result's `.earlyArrivalUncounted` flag and `extraBeforeSeconds` are not set yet.
+                let day = DayKey(opened.enteredAt, calendar: calendar)
+                let r = dayResult(for: day)
+                if let w = r.scheduledWindow, !(store.override(for: day)?.countEarlyArrival ?? false) {
+                    let early = Int(w.start.timeIntervalSince(opened.enteredAt).rounded())
+                    if early > settings.graceSeconds {
+                        notifications.post(.earlyArrival(day: day, title: "Arrived \(Format.hm(early)) early",
+                                                         body: "Early arrivals do not count unless you say so. Count it toward your balance?"))
+                    }
+                }
             }
         }
-        if outcome.orphanExit {
+        // Only when the Inbox (recomputed synchronously by `mutate`) raised the item: an exit within the
+        // engine's tolerance of a session boundary is accounted for and must not point at an empty Inbox.
+        if outcome.orphanExit, inbox.contains(where: { $0.key == "orphanExit:\(outcome.event.id.uuidString)" }) {
+            let name = locationName(outcome.event.locationID)
             notifications.post(.orphanExit(eventID: outcome.event.id, title: "Left \(name) at \(Format.time(outcome.event.at, calendar))",
                                            body: "No arrival was recorded for this visit. Add the arrival time from the Inbox."))
         }
@@ -411,30 +424,39 @@ final class AppModel {
             try mutateThrowing { s in
                 _ = try ManualTimer.start(store: &s, category: category ?? s.settings.defaultManualCategory, note: note, countsAs: countsAs, at: now)
             }
-            scheduleTimerNudge()
         } catch {
             alert = AppAlert(title: "Timer", message: "A timer is already running.")
         }
     }
 
+    // The nudge is scheduled/cancelled by `reconcileTimerNudge` inside `mutate`, so the editor's Stopped
+    // toggle, a delete, a restore or an import keep it in step too, not only these four calls.
     func pauseTimer() {
         do { try mutateThrowing { s in _ = try ManualTimer.pause(store: &s, at: now) } } catch { }
-        notifications.cancelTimerNudge()
     }
 
     func resumeTimer() {
         do { try mutateThrowing { s in _ = try ManualTimer.resume(store: &s, at: now) } } catch { }
-        scheduleTimerNudge()
     }
 
     func stopTimer() {
         do { try mutateThrowing { s in _ = try ManualTimer.stop(store: &s, at: now) } } catch { }
-        notifications.cancelTimerNudge()
     }
 
     func discardTimer() {
         do { try mutateThrowing { s in _ = try ManualTimer.discard(store: &s) } } catch { }
-        notifications.cancelTimerNudge()
+    }
+
+    /// Keeps the pending "timer still running" nudge in step with the active manual session after a
+    /// mutation, however it happened: cancel when nothing runs any more, (re)post when a different or
+    /// changed session is running.
+    private func reconcileTimerNudge(before: ManualSession?) {
+        let after = store.activeManualSession
+        if after?.state != .running {
+            if before?.state == .running { notifications.cancelTimerNudge() }
+        } else if before != after {
+            scheduleTimerNudge()
+        }
     }
 
     private func scheduleTimerNudge() {
@@ -548,8 +570,10 @@ final class AppModel {
         mutate { s in
             outcome = InboxResolver.apply(action, item: item, store: &s, now: now, date: date, seconds: seconds, window: window)
         }
-        if action == .stopTimerNow || action == .setTimerStop { notifications.cancelTimerNudge() }
-        if action == .stillWorking { scheduleTimerNudge() }
+        // Re-derive instead of cancelling up front: `.setTimerStop` returns `.needsInput` before the date is
+        // collected and the timer keeps running. scheduleTimerNudge() cancels when nothing runs and otherwise
+        // re-posts under the fixed identifier, so a stopped timer loses its nudge and a running one keeps it.
+        if action == .stopTimerNow || action == .setTimerStop || action == .stillWorking { scheduleTimerNudge() }
         return outcome
     }
 
@@ -563,8 +587,8 @@ final class AppModel {
         let from = from ?? allHistoryStart
         let through = through ?? today
         let name = "OTtracker \(from.isoString) to \(through.isoString).xlsx"
-        return try ExportService.writeXLSX(store: store, from: from, through: through, now: now, summary: summary,
-                                           leaveBalances: leaveBalances, to: AppFiles.shareScratch, filename: name)
+        return try ExportService.writeXLSX(store: store, from: from, through: through, now: now,
+                                           to: AppFiles.shareScratch, filename: name)
     }
 
     func exportJSON() throws -> URL {
@@ -584,8 +608,8 @@ final class AppModel {
               !store.dismissedInboxKeys.contains("export:\(key)"),
               earliestDay <= lastOfPrev else { return }
         do {
-            _ = try ExportService.writeXLSX(store: store, from: firstOfPrev, through: lastOfPrev, now: now, summary: summary,
-                                            leaveBalances: leaveBalances, to: AppFiles.exports, filename: "OTtracker-\(key).xlsx")
+            _ = try ExportService.writeXLSX(store: store, from: firstOfPrev, through: lastOfPrev, now: now,
+                                            to: AppFiles.exports, filename: "OTtracker-\(key).xlsx")
             monthlyExports = ExportService.existingMonthlyExports()
             recompute()
             notifications.post(.monthlyExport(month: key, title: "\(Format.month(firstOfPrev, calendar)) export ready",
@@ -624,7 +648,13 @@ final class AppModel {
     func handle(deepLink link: DeepLink) {
         switch link {
         case .home: selectedTab = .home
-        case .timerStart: selectedTab = .home; if activeTimer == nil { startTimer() }
+        case .timerStart:
+            selectedTab = .home
+            if let t = activeTimer {
+                if t.state == .paused { resumeTimer() }
+            } else {
+                startTimer()
+            }
         case .timerPause: pauseTimer()
         case .timerResume: resumeTimer()
         case .timerStop: stopTimer()
@@ -634,13 +664,34 @@ final class AppModel {
     }
 
     private func handle(notificationResponse r: NotificationResponse) {
+        // Actions without `.foreground` run while the app stays in the background, so the cases that mutate
+        // persist synchronously (`saveNow` is an atomic write) before `didReceive` returns and the process
+        // may be suspended; the 800 ms debounced save could otherwise be lost.
         switch r {
         case .open(let link): handle(deepLink: link)
-        case .confirmExit(let id): dismissInbox(key: "exit:\(id.uuidString)")
+        case .confirmExit(let id):
+            dismissInbox(key: "exit:\(id.uuidString)")
+            saveNow()
         case .adjustExit(let id): selectedTab = .log; pendingRoute = .editPresence(id)
-        case .countEarlyArrival(let day): countEarlyArrival(day: day)
-        case .stopTimer: stopTimer()
-        case .timerStillWorking: scheduleTimerNudge()
+        case .countEarlyArrival(let day):
+            countEarlyArrival(day: day)
+            saveNow()
+        case .stopTimer(let id):
+            // "Stop now" on a stale nudge must not stop a different timer started since.
+            guard activeTimer?.id == id else { return }
+            stopTimer()
+            saveNow()
+        case .timerStillWorking(let id):
+            if let t = activeTimer, t.id == id, t.state == .running {
+                // Same key InboxEngine.timerItems derives, so the lock-screen answer also clears the Inbox item.
+                let (nudgeSeconds, overflow) = store.settings.timerNudgeMinutes.multipliedReportingOverflow(by: 60)
+                if !overflow, nudgeSeconds > 0 {
+                    let n = t.activeSeconds(now: now) / nudgeSeconds
+                    if n >= 1 { dismissInbox(key: "timer:\(t.id.uuidString):\(n)") }
+                }
+            }
+            scheduleTimerNudge()
+            saveNow()
         case .emailExport(let month): selectedTab = .inbox; pendingRoute = .exportMonth(month, email: true)
         case .shareExport(let month): selectedTab = .inbox; pendingRoute = .exportMonth(month, email: false)
         }
