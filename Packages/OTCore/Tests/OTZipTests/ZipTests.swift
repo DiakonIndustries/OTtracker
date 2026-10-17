@@ -52,6 +52,12 @@ enum ZipTestData {
         c.timeZone = TimeZone(identifier: "UTC")!
         return c.date(from: DateComponents(year: y, month: m, day: d, hour: h, minute: mi, second: s))!
     }
+
+    /// Python `zipfile` writing to a non-seekable stream: flag bit 3 (data descriptors), ZIP_DEFLATED, a directory
+    /// entry, an empty deflated file, a stored file, a UTF-8 name and an archive comment.
+    static let pythonDescriptorArchive = """
+        UEsDBBQACAAIAEq4UF0AAAAAAAAAAAAAAAAEAAAAZGlyLwMAUEsHCAAAAAACAAAAAAAAAFBLAwQUAAgACABKuFBdAAAAAAAAAAAAAAAADQAAAGRpci9oZWxsby50eHTLSM3JyVfIIIIszy/KSQEAUEsHCK/BS7UQAAAALwAAAFBLAwQUAAgACABKuFBdAAAAAAAAAAAAAAAACQAAAGVtcHR5LmJpbgMAUEsHCAAAAAACAAAAAAAAAFBLAwQUAAgAAAAAACEAAAAAAAAAAAAAAAAACgAAAHN0b3JlZC50eHRzdG9yZWQgYnl0ZXNQSwcIeHemDwwAAAAMAAAAUEsDBBQACAgIAEq4UF0AAAAAAAAAAAAAAAAXAAAAdW5pY29kZS3DqcOoLeaXpeacrC50eHRLTkw7vFLh0ZzJAFBLBwjQTS0jCwAAAAkAAABQSwECFAMUAAgACABKuFBdAAAAAAIAAAAAAAAABAAAAAAAAAAAABAA/UEAAAAAZGlyL1BLAQIUAxQACAAIAEq4UF2vwUu1EAAAAC8AAAANAAAAAAAAAAAAAACAATQAAABkaXIvaGVsbG8udHh0UEsBAhQDFAAIAAgASrhQXQAAAAACAAAAAAAAAAkAAAAAAAAAAAAAAIABfwAAAGVtcHR5LmJpblBLAQIUAxQACAAAAAAAIQB4d6YPDAAAAAwAAAAKAAAAAAAAAAAAAACAAbgAAABzdG9yZWQudHh0UEsBAhQDFAAICAgASrhQXdBNLSMLAAAACQAAABcAAAAAAAAAAAAAAIAB/AAAAHVuaWNvZGUtw6nDqC3ml6XmnKwudHh0UEsFBgAAAAAFAAUAIQEAAEwBAAAUAGFyY2hpdmUgY29tbWVudCBoZXJl
+        """
 }
 
 // MARK: - CRC-32
@@ -187,10 +193,7 @@ final class ZipRoundTripTests: XCTestCase {
     func testPythonZipWithDataDescriptorsDeflateAndComment() throws {
         // zipfile.ZipFile on a non-seekable stream: flag bit 3 (data descriptors), ZIP_DEFLATED,
         // a directory entry, an empty deflated file, a stored file and an archive comment.
-        let b64 = """
-        UEsDBBQACAAIAEq4UF0AAAAAAAAAAAAAAAAEAAAAZGlyLwMAUEsHCAAAAAACAAAAAAAAAFBLAwQUAAgACABKuFBdAAAAAAAAAAAAAAAADQAAAGRpci9oZWxsby50eHTLSM3JyVfIIIIszy/KSQEAUEsHCK/BS7UQAAAALwAAAFBLAwQUAAgACABKuFBdAAAAAAAAAAAAAAAACQAAAGVtcHR5LmJpbgMAUEsHCAAAAAACAAAAAAAAAFBLAwQUAAgAAAAAACEAAAAAAAAAAAAAAAAACgAAAHN0b3JlZC50eHRzdG9yZWQgYnl0ZXNQSwcIeHemDwwAAAAMAAAAUEsDBBQACAgIAEq4UF0AAAAAAAAAAAAAAAAXAAAAdW5pY29kZS3DqcOoLeaXpeacrC50eHRLTkw7vFLh0ZzJAFBLBwjQTS0jCwAAAAkAAABQSwECFAMUAAgACABKuFBdAAAAAAIAAAAAAAAABAAAAAAAAAAAABAA/UEAAAAAZGlyL1BLAQIUAxQACAAIAEq4UF2vwUu1EAAAAC8AAAANAAAAAAAAAAAAAACAATQAAABkaXIvaGVsbG8udHh0UEsBAhQDFAAIAAgASrhQXQAAAAACAAAAAAAAAAkAAAAAAAAAAAAAAIABfwAAAGVtcHR5LmJpblBLAQIUAxQACAAAAAAAIQB4d6YPDAAAAAwAAAAKAAAAAAAAAAAAAACAAbgAAABzdG9yZWQudHh0UEsBAhQDFAAICAgASrhQXdBNLSMLAAAACQAAABcAAAAAAAAAAAAAAIAB/AAAAHVuaWNvZGUtw6nDqC3ml6XmnKwudHh0UEsFBgAAAAAFAAUAIQEAAEwBAAAUAGFyY2hpdmUgY29tbWVudCBoZXJl
-        """
-        let data = try XCTUnwrap(Data(base64Encoded: b64, options: .ignoreUnknownCharacters))
+        let data = try XCTUnwrap(Data(base64Encoded: ZipTestData.pythonDescriptorArchive, options: .ignoreUnknownCharacters))
         let back = try ZipReader.entries(from: data)
         XCTAssertEqual(back.map { $0.path }, ["dir/hello.txt", "empty.bin", "stored.txt", "unicode-éè-日本.txt"], "directory entry skipped")
         XCTAssertEqual(back[0].data, Data("hello hello hello hello hello hello hello world".utf8))

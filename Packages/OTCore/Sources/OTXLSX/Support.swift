@@ -14,21 +14,26 @@ public enum ColumnReference {
         return out
     }
 
-    /// Zero-based column index for a cell reference such as `B7` or `AA12`; nil when it has no letters.
+    /// Zero-based column index for a cell reference such as `B7` or `AA12`; nil when it has no letters
+    /// or the letters run past what an `Int` can hold.
     public static func index(ofReference ref: String) -> Int? {
         var n = 0
         var sawLetter = false
         for ch in ref {
             guard let ascii = ch.asciiValue else { return nil }
+            let digit: Int
             if ascii >= 65 && ascii <= 90 {           // A–Z
-                n = n * 26 + Int(ascii - 64)
-                sawLetter = true
+                digit = Int(ascii - 64)
             } else if ascii >= 97 && ascii <= 122 {   // a–z
-                n = n * 26 + Int(ascii - 96)
-                sawLetter = true
+                digit = Int(ascii - 96)
             } else {
                 break
             }
+            let (scaled, overflow1) = n.multipliedReportingOverflow(by: 26)
+            let (next, overflow2) = scaled.addingReportingOverflow(digit)
+            if overflow1 || overflow2 { return nil }
+            n = next
+            sawLetter = true
         }
         return sawLetter ? n - 1 : nil
     }

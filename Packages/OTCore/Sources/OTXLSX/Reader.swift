@@ -81,6 +81,7 @@ class PartParser: NSObject, XMLParserDelegate {
     var collectingText = false
     var failure: XLSXError?
     private var depth = 0
+    private weak var activeParser: XMLParser?
 
     init(partName: String) {
         self.partName = partName
@@ -91,6 +92,8 @@ class PartParser: NSObject, XMLParserDelegate {
         parser.shouldProcessNamespaces = false
         parser.shouldResolveExternalEntities = false
         parser.delegate = self
+        activeParser = parser
+        defer { activeParser = nil }
         let ok = parser.parse()
         if let failure { throw failure }
         if !ok {
@@ -106,10 +109,21 @@ class PartParser: NSObject, XMLParserDelegate {
         return String(name[name.index(after: colon)...])
     }
 
+    /// Records the first failure and stops the parser; `run` rethrows it.
+    func fail(_ error: XLSXError) {
+        guard failure == nil else { return }
+        failure = error
+        activeParser?.abortParsing()
+    }
+
+    /// Exact name first, then the lexically smallest prefixed attribute with that local name (deterministic).
     static func attribute(_ name: String, in attributes: [String: String]) -> String? {
         if let v = attributes[name] { return v }
-        for (k, v) in attributes where local(k) == name { return v }
-        return nil
+        var best: (key: String, value: String)?
+        for (k, v) in attributes where local(k) == name {
+            if best == nil || k < best!.key { best = (k, v) }
+        }
+        return best?.value
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
@@ -155,8 +169,11 @@ final class RelationshipsParser: PartParser {
 final class WorkbookPartParser: PartParser {
     struct SheetRef { var name: String; var relationshipID: String? }
     var sheets: [SheetRef] = []
+    /// Local name of the document element; anything but `workbook` means the package is not a spreadsheet.
+    var rootElement: String?
 
     override func start(_ element: String, _ a: [String: String]) {
+        if rootElement == nil { rootElement = element }
         guard element == "sheet" else { return }
         sheets.append(SheetRef(name: PartParser.attribute("name", in: a) ?? "Sheet\(sheets.count + 1)",
                                relationshipID: PartParser.attribute("id", in: a)))
@@ -197,11 +214,14 @@ final class StylesParser: PartParser {
     var customFormats: [Int: String] = [:]
     var cellXfNumFmtIDs: [Int] = []
     private var inCellXfs = false
+    private var inNumFmts = false
 
     override func start(_ element: String, _ a: [String: String]) {
         switch element {
+        case "numFmts": inNumFmts = true
         case "numFmt":
-            if let idText = PartParser.attribute("numFmtId", in: a), let id = Int(idText) {
+            // Only the shared table counts; `<dxf>` (conditional formatting) carries its own numFmt elements.
+            if inNumFmts, let idText = PartParser.attribute("numFmtId", in: a), let id = Int(idText) {
                 customFormats[id] = PartParser.attribute("formatCode", in: a) ?? ""
             }
         case "cellXfs": inCellXfs = true
@@ -215,6 +235,7 @@ final class StylesParser: PartParser {
 
     override func end(_ element: String) {
         if element == "cellXfs" { inCellXfs = false }
+        if element == "numFmts" { inNumFmts = false }
     }
 
     /// True when cell style `index` formats numbers as dates or times.
@@ -258,6 +279,10 @@ final class StylesParser: PartParser {
 
 /// One `xl/worksheets/sheetN.xml` → rows of `Cell`, plus frozen header and column widths.
 final class WorksheetParser: PartParser {
+    /// Excel's own limits; references beyond them are treated as sequential rather than padded.
+    static let maxRows = 1_048_576
+    static let maxColumns = 16_384
+
     let sharedStrings: [String]
     let styles: StylesParser?
     let timeZone: TimeZone
@@ -304,7 +329,7 @@ final class WorksheetParser: PartParser {
             }
         case "row":
             guard inSheetData else { return }
-            if let rText = PartParser.attribute("r", in: a), let r = Int(rText), r >= 1 {
+            if let rText = PartParser.attribute("r", in: a), let r = Int(rText), r >= 1, r <= WorksheetParser.maxRows {
                 while rows.count < r - 1 { rows.append([]) }
             }
             currentRow = []
@@ -317,7 +342,8 @@ final class WorksheetParser: PartParser {
             value = nil
             formula = nil
             inlineText = nil
-            if let ref = PartParser.attribute("r", in: a), let col = ColumnReference.index(ofReference: ref) {
+            if let ref = PartParser.attribute("r", in: a), let col = ColumnReference.index(ofReference: ref),
+               col < WorksheetParser.maxColumns {
                 cellColumn = col
             } else {
                 cellColumn = currentRow.count
@@ -386,8 +412,11 @@ final class WorksheetParser: PartParser {
         case "inlineStr":
             return .string(XLSXReader.decodeEscapes(inlineText ?? ""))
         case "s":
-            guard let v = value, let index = Int(v.trimmingCharacters(in: .whitespaces)),
-                  index >= 0, index < sharedStrings.count else { return .empty }
+            let raw = (value ?? "").trimmingCharacters(in: .whitespaces)
+            guard let index = Int(raw), index >= 0, index < sharedStrings.count else {
+                fail(.malformed("\(partName): shared string index \"\(raw)\" out of range (\(sharedStrings.count) strings)"))
+                return .empty
+            }
             return .string(sharedStrings[index])
         case "b":
             guard let v = value?.trimmingCharacters(in: .whitespaces), !v.isEmpty else { return formulaOrEmpty() }
@@ -424,18 +453,27 @@ extension XLSXReader {
         let package = try XLSXPackage(zip: data)
 
         var workbookPath = "xl/workbook.xml"
+        var locatedByRelationship = false
         if let rootRels = package.part("_rels/.rels") {
             let p = RelationshipsParser(partName: "_rels/.rels")
             try p.run(rootRels)
             if let office = p.first(typeSuffix: "/officeDocument") {
                 workbookPath = XLSXPackage.resolve(target: office.target, baseDirectory: "")
+                locatedByRelationship = true
             }
         }
-        let workbookData = try package.requiredPart(workbookPath)
+        // A zip that names no main document and has no xl/workbook.xml is not a spreadsheet at all;
+        // a package whose relationships point at a part that is gone is a broken spreadsheet.
+        guard let workbookData = package.part(workbookPath) else {
+            if locatedByRelationship { throw XLSXError.missingPart(XLSXPackage.normalise(workbookPath)) }
+            throw XLSXError.notAWorkbook
+        }
         let workbookDir = XLSXPackage.directory(of: workbookPath)
 
         let workbookParser = WorkbookPartParser(partName: workbookPath)
         try workbookParser.run(workbookData)
+        // The main document of a .docx/.pptx (or anything else) is not a <workbook>.
+        guard workbookParser.rootElement == "workbook" else { throw XLSXError.notAWorkbook }
 
         let relsPath = XLSXPackage.relsPath(for: workbookPath)
         let rels = RelationshipsParser(partName: relsPath)

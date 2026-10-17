@@ -257,9 +257,12 @@ public enum ZipReader {
             case 0:
                 guard compressedSize == uncompressedSize else { throw ZipError.corruptEntry(name) }
                 payload = Data(raw)
+            case 8 where compressedSize == 0 && uncompressedSize == 0:
+                payload = Data()   // Some writers emit no deflate stream at all for an empty file.
             case 8:
                 do {
-                    payload = try Inflate.decompress(Data(raw))
+                    // The declared size bounds the output so a corrupt or malicious stream cannot exhaust memory.
+                    payload = try Inflate.decompress(Data(raw), maxOutputSize: uncompressedSize)
                 } catch ZipError.corruptEntry(let reason) {
                     throw ZipError.corruptEntry("\(name): \(reason)")
                 }
@@ -281,15 +284,18 @@ public enum ZipReader {
         guard count >= endRecordLength else { throw ZipError.notAZip }
         let lowest = max(0, count - endRecordLength - maxCommentLength)
         var pos = count - endRecordLength
+        var fallback: Int?
         while pos >= lowest {
             if (try? r.u32(at: pos)) == endRecordSignature {
-                // Prefer a record whose comment length matches the remaining bytes, but accept any.
+                // Prefer the record whose comment length reaches the end of the file: a signature that happens
+                // to appear inside the archive comment would otherwise be mistaken for the record itself.
                 let commentLength = try r.u16(at: pos + 20)
                 if pos + endRecordLength + commentLength == count { return pos }
-                return pos
+                if fallback == nil { fallback = pos }
             }
             pos -= 1
         }
+        if let fallback { return fallback }
         throw ZipError.notAZip
     }
 
@@ -332,7 +338,13 @@ public enum CRC32 {
 public enum Inflate {
     /// Decompresses a raw deflate stream (no zlib or gzip wrapper). Bad input throws `ZipError.corruptEntry`.
     public static func decompress(_ data: Data) throws -> Data {
-        var state = InflateState(input: [UInt8](data))
+        try decompress(data, maxOutputSize: Int.max)
+    }
+
+    /// Like `decompress(_:)`, but throws `ZipError.corruptEntry` as soon as the output would exceed
+    /// `maxOutputSize` bytes, so a stream that lies about its size cannot exhaust memory.
+    public static func decompress(_ data: Data, maxOutputSize: Int) throws -> Data {
+        var state = InflateState(input: [UInt8](data), maxOutput: max(0, maxOutputSize))
         try state.run()
         return Data(state.output)
     }
@@ -377,6 +389,7 @@ private struct Huffman {
 
 private struct InflateState {
     let input: [UInt8]
+    let maxOutput: Int
     var inPos = 0
     var bitBuf: UInt32 = 0
     var bitCnt = 0
@@ -403,9 +416,15 @@ private struct InflateState {
         try? Huffman(lengths: [Int](repeating: 5, count: 30))
     }()
 
-    init(input: [UInt8]) {
+    init(input: [UInt8], maxOutput: Int) {
         self.input = input
-        output.reserveCapacity(input.count * 3)
+        self.maxOutput = maxOutput
+        output.reserveCapacity(min(input.count * 3, maxOutput, 1 << 24))
+    }
+
+    /// Throws when appending `count` more bytes would exceed the caller's output bound.
+    private func checkRoom(for count: Int) throws {
+        guard count <= maxOutput - output.count else { throw ZipError.corruptEntry("inflated data exceeds declared size") }
     }
 
     /// Reads `need` (≤ 16) bits, least-significant first; running out of input throws.
@@ -464,6 +483,7 @@ private struct InflateState {
         inPos += 4
         guard len == (~nlen & 0xFFFF) else { throw ZipError.corruptEntry("stored block length mismatch") }
         guard inPos + len <= input.count else { throw ZipError.corruptEntry("deflate stream truncated") }
+        try checkRoom(for: len)
         output.append(contentsOf: input[inPos..<(inPos + len)])
         inPos += len
     }
@@ -530,6 +550,7 @@ private struct InflateState {
         while true {
             var symbol = try decode(literal)
             if symbol < 256 {
+                try checkRoom(for: 1)
                 output.append(UInt8(symbol))
                 continue
             }
@@ -542,6 +563,7 @@ private struct InflateState {
             guard dsym < InflateState.distanceBase.count else { throw ZipError.corruptEntry("invalid distance symbol") }
             let dist = InflateState.distanceBase[dsym] + (try bits(InflateState.distanceExtra[dsym]))
             guard dist <= output.count, dist > 0 else { throw ZipError.corruptEntry("distance too far back") }
+            try checkRoom(for: len)
 
             let start = output.count - dist
             if dist >= len {

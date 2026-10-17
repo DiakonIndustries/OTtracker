@@ -73,7 +73,10 @@ extension XLSXWriter {
         for (i, name) in names.enumerated() {
             s += "<sheet name=\"\(XMLText.escape(name))\" sheetId=\"\(i + 1)\" r:id=\"rId\(i + 1)\"/>"
         }
-        s += "</sheets></workbook>"
+        s += "</sheets>"
+        // Formula cells carry no cached value; this asks Excel and LibreOffice to compute them on open.
+        s += "<calcPr fullCalcOnLoad=\"1\"/>"
+        s += "</workbook>"
         return s
     }
 
@@ -178,7 +181,9 @@ extension XLSXWriter {
         case .bool(let b):
             return "<c r=\"\(reference)\"\(styleAttr(textStyle)) t=\"b\"><v>\(b ? 1 : 0)</v></c>"
         case .formula(let f):
-            return "<c r=\"\(reference)\"\(styleAttr(textStyle))><f>\(XMLText.escape(f))</f></c>"
+            // `<f>` holds the formula without the leading `=`; tolerate callers that include it.
+            let body = f.hasPrefix("=") ? String(f.dropFirst()) : f
+            return "<c r=\"\(reference)\"\(styleAttr(textStyle))><f>\(XMLText.escape(body))</f></c>"
         case .date(let date):
             let serial = ExcelDate.serial(from: date, timeZone: timeZone)
             return "<c r=\"\(reference)\"\(styleAttr(CellStyle.dateTime))><v>\(formatSerial(serial))</v></c>"
@@ -224,13 +229,14 @@ extension XLSXWriter {
 
     // MARK: Sheet names
 
-    /// Excel rules: ≤ 31 characters, none of `[]:*?/\`, not empty, unique (case-insensitive).
+    /// Excel rules: ≤ 31 characters, none of `[]:*?/\`, not empty, not the reserved `History`, unique (case-insensitive).
     static func sanitisedSheetNames(_ names: [String]) -> [String] {
         var used = Set<String>()
         var out: [String] = []
         for (i, raw) in names.enumerated() {
             var base = sanitiseSheetName(raw)
             if base.isEmpty { base = "Sheet\(i + 1)" }
+            if base.lowercased() == "history" { base += "_" }
             var candidate = base
             var n = 2
             while used.contains(candidate.lowercased()) {
@@ -248,10 +254,17 @@ extension XLSXWriter {
     static func sanitiseSheetName(_ raw: String) -> String {
         let forbidden: Set<Character> = ["[", "]", ":", "*", "?", "/", "\\"]
         var s = String(raw.filter { !forbidden.contains($0) && !$0.isNewline })
-        s = s.trimmingCharacters(in: .whitespaces)
-        while s.hasPrefix("'") { s.removeFirst() }
-        while s.hasSuffix("'") { s.removeLast() }
-        if s.count > maxSheetNameLength { s = String(s.prefix(maxSheetNameLength)) }
-        return s.trimmingCharacters(in: .whitespaces)
+        func trim() {
+            s = s.trimmingCharacters(in: .whitespaces)
+            while s.hasPrefix("'") { s.removeFirst() }
+            while s.hasSuffix("'") { s.removeLast() }
+            s = s.trimmingCharacters(in: .whitespaces)
+        }
+        trim()
+        if s.count > maxSheetNameLength {
+            s = String(s.prefix(maxSheetNameLength))
+            trim()   // truncation may expose a trailing space or apostrophe, which Excel rejects
+        }
+        return s
     }
 }

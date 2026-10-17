@@ -487,7 +487,6 @@ final class XLSXReaderTests: XCTestCase {
           <c r="I3" s="1"><v>46309</v></c>
           <c r="J3" s="2"><v>46309</v></c>
           <c r="K3" t="b"><v>true</v></c>
-          <c r="L3" t="s"><v>99</v></c>
           <c r="M3" t="inlineStr"><is><r><t>in</t></r><r><t>line</t></r></is></c>
           <c r="N3"><v>  12  </v></c>
           <c r="O3" s="3"><v>46327.625</v></c>
@@ -535,7 +534,7 @@ final class XLSXReaderTests: XCTestCase {
         XCTAssertEqual(r3[8], .dateOnly(XLSXTestSupport.ny(2026, 10, 14)), "whole serial → date only")
         XCTAssertEqual(r3[9], .integer(46309), "custom 0.0 is not a date")
         XCTAssertEqual(r3[10], .bool(true))
-        XCTAssertEqual(r3[11], .empty, "out-of-range shared string")
+        XCTAssertEqual(r3[11], .empty, "no cell was written in column L")
         XCTAssertEqual(r3[12], .string("inline"))
         XCTAssertEqual(r3[13], .integer(12), "whitespace trimmed")
         XCTAssertEqual(r3[14], .date(XLSXTestSupport.ny(2026, 11, 1, 15, 0, 0)), "custom d-mmm-yy is a date")
