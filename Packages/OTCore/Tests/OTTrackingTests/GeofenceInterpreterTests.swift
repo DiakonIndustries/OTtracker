@@ -348,4 +348,104 @@ final class GeofenceInterpreterTests: XCTestCase {
         XCTAssertEqual(store.presence[1].exitedAt, F.date("2026-10-14 15:30"))
         XCTAssertNil(store.presence[0].followingGapIsWork)
     }
+
+    // MARK: Verification: flap boundaries, later sessions, extreme settings
+
+    func testFlapBoundaryOneSecondEitherSideOfMergeMinutes() {
+        func reenter(at reenter: String) -> (Store, InterpretationOutcome) {
+            var s = F.store()
+            GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 07:02"), to: &s)
+            GeofenceInterpreter.apply(F.exit(F.plantA, "2026-10-14 12:00:00"), to: &s)
+            let out = GeofenceInterpreter.apply(F.enter(F.plantA, reenter), to: &s)
+            return (s, out)
+        }
+        let (before, outBefore) = reenter(at: "2026-10-14 12:02:59")
+        XCTAssertTrue(outBefore.reopened)
+        XCTAssertEqual(before.presence.count, 1)
+        XCTAssertNil(before.presence[0].exitedAt)
+
+        let (exact, outExact) = reenter(at: "2026-10-14 12:03:00")
+        XCTAssertFalse(outExact.reopened, "exactly flapMergeMinutes is not less than flapMergeMinutes")
+        XCTAssertEqual(exact.presence.count, 2)
+        XCTAssertEqual(exact.presence[0].exitedAt, F.date("2026-10-14 12:00:00"))
+        XCTAssertEqual(exact.presence[1].enteredAt, F.date("2026-10-14 12:03:00"))
+
+        let (after, outAfter) = reenter(at: "2026-10-14 12:03:01")
+        XCTAssertFalse(outAfter.reopened)
+        XCTAssertEqual(after.presence.count, 2)
+        XCTAssertEqual(after.presence[1].enteredAt, F.date("2026-10-14 12:03:01"))
+    }
+
+    func testFlapDoesNotReopenWhenAnotherSessionWasRecordedSinceTheExit() {
+        // Out of A's region, 20 s inside the adjacent plant B's region, back into A within the flap
+        // window: the device really left, so A's exit stands. Reopening A would make it overlap B and
+        // the ledger's "later location wins" rule (SPEC 4.7) would cut A off at 12:00:30 for the day.
+        var store = F.store()
+        GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 07:02"), to: &store)
+        GeofenceInterpreter.apply(F.exit(F.plantA, "2026-10-14 12:00:00"), to: &store)
+        GeofenceInterpreter.apply(F.enter(F.plantB, "2026-10-14 12:00:30"), to: &store)
+        GeofenceInterpreter.apply(F.exit(F.plantB, "2026-10-14 12:00:50"), to: &store)
+        let out = GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 12:01:00"), to: &store)
+
+        XCTAssertFalse(out.reopened)
+        XCTAssertNil(out.closed)
+        XCTAssertEqual(store.presence.count, 3)
+        XCTAssertEqual(store.presence[0].exitedAt, F.date("2026-10-14 12:00:00"), "the recorded exit stands")
+        XCTAssertEqual(store.presence[1].locationID, F.plantB)
+        XCTAssertEqual(store.presence[1].exitedAt, F.date("2026-10-14 12:00:50"))
+        XCTAssertEqual(store.presence[2].locationID, F.plantA)
+        XCTAssertEqual(store.presence[2].enteredAt, F.date("2026-10-14 12:01:00"))
+        XCTAssertNil(store.presence[2].exitedAt)
+        XCTAssertEqual(out.opened, store.presence[2])
+        XCTAssertEqual(store.locationEvents.count, 5)
+    }
+
+    func testFlapStillReopensWhenTheOnlyOtherSessionsAreOlder() {
+        var store = F.store()
+        store.presence = [
+            F.session(F.plantB, "2026-10-13 07:00", "2026-10-13 15:30"),
+            F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 12:00"),
+        ]
+        let out = GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 12:01"), to: &store)
+        XCTAssertTrue(out.reopened)
+        XCTAssertEqual(store.presence.count, 2)
+        XCTAssertNil(store.presence[1].exitedAt)
+    }
+
+    func testOutOfOrderEnterAfterALaterSessionExistsNeverReopens() {
+        var store = F.store()
+        let a = F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 12:00")
+        let b = F.session(F.plantB, "2026-10-14 12:30", "2026-10-14 15:00")
+        store.presence = [a, b]
+        let out = GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 12:01", source: .manual), to: &store)
+        XCTAssertFalse(out.reopened)
+        XCTAssertEqual(store.presenceSession(id: a.id)?.exitedAt, a.exitedAt)
+        XCTAssertEqual(store.presenceSession(id: b.id), b)
+        XCTAssertEqual(store.presence.count, 3)
+        XCTAssertEqual(store.presence[2].enteredAt, F.date("2026-10-14 12:01"))
+        XCTAssertNil(store.presence[2].exitedAt, "an open session the stale rule will ask about; no fact is invented")
+        XCTAssertTrue(store.presence.allSatisfy { $0.seconds(now: F.date("2026-10-14 18:00")) >= 0 })
+    }
+
+    func testSimultaneousEntersAtTwoLocations() {
+        var store = F.store()
+        GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 07:00"), to: &store)
+        let out = GeofenceInterpreter.apply(F.enter(F.plantB, "2026-10-14 07:00"), to: &store)
+        XCTAssertEqual(out.closed?.exitedAt, F.date("2026-10-14 07:00"))
+        XCTAssertEqual(store.presence[0].seconds(now: F.date("2026-10-14 18:00")), 0)
+        XCTAssertEqual(store.openPresenceSession?.locationID, F.plantB)
+        XCTAssertEqual(store.presence.count, 2)
+    }
+
+    func testExtremeFlapMergeMinutesDoesNotTrap() {
+        for minutes in [Int.max, Int.min, -1] {
+            var store = F.store()
+            store.settings.flapMergeMinutes = minutes
+            GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 07:02"), to: &store)
+            GeofenceInterpreter.apply(F.exit(F.plantA, "2026-10-14 12:00"), to: &store)
+            let out = GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 12:01"), to: &store)
+            XCTAssertEqual(out.reopened, minutes > 0, "\(minutes)")
+            XCTAssertEqual(store.locationEvents.count, 3)
+        }
+    }
 }

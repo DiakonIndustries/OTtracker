@@ -1,5 +1,6 @@
 import Foundation
 import OTModels
+import OTLedger
 
 /// See docs/SPEC.md section 5.3. Pure: the Inbox is derived from facts, day results and `now`.
 public enum InboxEngine {
@@ -60,36 +61,34 @@ public enum InboxEngine {
 
     // MARK: gap:<sessionID>
 
-    /// Consecutive sessions (by `enteredAt`) whose gap falls inside one day's scheduled window
-    /// and whose earlier session has no decision yet.
+    /// Undecided mid-day gaps on every day result the ledger flagged `.gapUndecided`, re-derived
+    /// with `Ledger.gaps` so the subject (the session whose `followingGapIsWork` the ledger reads),
+    /// the amount and the default are exactly what the ledger applied: merged overlapping sessions,
+    /// regular manual time joining presence and the "later location wins" rule included.
+    /// A gap that follows a regular manual segment has no session to carry a decision and raises
+    /// nothing. Results without the flag raise nothing.
     static func gapItems(_ ctx: Context) -> [InboxItem] {
-        let ordered = ctx.store.presence.sorted { a, b in
-            if a.enteredAt != b.enteredAt { return a.enteredAt < b.enteredAt }
-            return a.id.uuidString < b.id.uuidString
-        }
-        guard ordered.count >= 2 else { return [] }
         var items: [InboxItem] = []
-        for (a, b) in zip(ordered, ordered.dropFirst()) {
-            guard a.followingGapIsWork == nil, let exitedAt = a.exitedAt, b.enteredAt > exitedAt else { continue }
-            let day = ctx.day(of: exitedAt)
-            guard day == ctx.day(of: b.enteredAt),
-                  let result = ctx.byDay[day], let window = result.scheduledWindow else { continue }
-            let gap = Interval(start: exitedAt, end: b.enteredAt)
-            guard gap.overlaps(window), let inside = gap.clipped(to: window) else { continue }
-            let sameLocation = a.locationID == b.locationID
-            let destination = sameLocation
-                ? "returned to \(ctx.locationName(b.locationID))"
-                : "arrived at \(ctx.locationName(b.locationID))"
-            items.append(InboxItem(
-                key: "gap:\(a.id.uuidString)",
-                kind: .gap,
-                day: day,
-                occurredAt: exitedAt,
-                title: "Away \(ctx.time(exitedAt)) – \(ctx.time(b.enteredAt))",
-                detail: "Left \(ctx.locationName(a.locationID)), \(destination) · \(DurationFormat.hm(gap.seconds))",
-                defaultApplied: sameLocation ? "Deducted \(DurationFormat.hm(inside.seconds))" : "Counted as work",
-                actions: [.markGapWork, .markGapPersonal],
-                subjectID: a.id))
+        for result in ctx.byDay.values where result.flags.contains(.gapUndecided) && result.scheduledWindow != nil {
+            for gap in Ledger.gaps(store: ctx.store, day: result.day, now: ctx.now) where gap.isUndecided {
+                guard let sessionID = gap.sessionID, let from = gap.fromLocationID else { continue }
+                let destination: String
+                if let to = gap.toLocationID {
+                    destination = to == from ? "returned to \(ctx.locationName(to))" : "arrived at \(ctx.locationName(to))"
+                } else {
+                    destination = "resumed with manual time"
+                }
+                items.append(InboxItem(
+                    key: "gap:\(sessionID.uuidString)",
+                    kind: .gap,
+                    day: result.day,
+                    occurredAt: gap.interval.start,
+                    title: "Away \(ctx.time(gap.interval.start)) – \(ctx.time(gap.interval.end))",
+                    detail: "Left \(ctx.locationName(from)), \(destination) · \(DurationFormat.hm(gap.interval.seconds))",
+                    defaultApplied: gap.countsAsWork ? "Counted as work" : "Deducted \(DurationFormat.hm(gap.secondsInsideWindow))",
+                    actions: [.markGapWork, .markGapPersonal],
+                    subjectID: sessionID))
+            }
         }
         return items
     }
@@ -123,17 +122,15 @@ public enum InboxEngine {
 
     /// The last geofence exit of today or yesterday when it moved the delta (stayed late or left early).
     static func exitItems(_ ctx: Context) -> [InboxItem] {
+        let recent = ctx.yesterday.start(in: ctx.calendar)
         var items: [InboxItem] = []
         for s in ctx.store.presence {
-            guard s.source == .geofence, let exitedAt = s.exitedAt else { continue }
+            guard s.source == .geofence, let exitedAt = s.exitedAt, exitedAt >= recent else { continue }
             let day = ctx.day(of: exitedAt)
             guard ctx.isTodayOrYesterday(day), let result = ctx.byDay[day] else { continue }
             guard result.extraAfterSeconds > 0 || result.earlyExitSeconds > 0 else { continue }
             // Only the day's final departure moves the boundary; mid-day exits are gap items.
-            let somethingFollows = ctx.store.presence.contains { other in
-                other.id != s.id && other.enteredAt >= exitedAt && ctx.day(of: other.enteredAt) == day
-            }
-            guard !somethingFollows else { continue }
+            guard !presenceContinues(after: exitedAt, on: day, excluding: s.id, ctx) else { continue }
             let detail: String
             let applied: String
             if result.extraAfterSeconds > 0 {
@@ -155,6 +152,21 @@ public enum InboxEngine {
                 subjectID: s.id))
         }
         return items
+    }
+
+    /// True when the ledger counts presence past `instant` on `day` besides session `sessionID`:
+    /// another presence session (open ones run to `now`, wherever they began) or a regular manual
+    /// segment, either of which moves the day's last exit beyond this one (SPEC 4.2).
+    static func presenceContinues(after instant: Date, on day: DayKey, excluding sessionID: UUID, _ ctx: Context) -> Bool {
+        let dayEnd = day.end(in: ctx.calendar)
+        if ctx.store.presence.contains(where: { other in
+            other.id != sessionID && other.enteredAt < dayEnd && other.interval(now: ctx.now).end > instant
+        }) { return true }
+        return ctx.store.manual.contains { m in
+            m.countsAs == .regular && m.segments.contains { seg in
+                seg.start < dayEnd && seg.interval(now: ctx.now).end > instant
+            }
+        }
     }
 
     // MARK: early:<yyyy-MM-dd>
@@ -185,8 +197,8 @@ public enum InboxEngine {
 
     /// The running timer once it has been active for `n` whole nudge periods (`n >= 1`).
     static func timerItems(_ ctx: Context) -> [InboxItem] {
-        let nudgeSeconds = ctx.store.settings.timerNudgeMinutes * 60
-        guard nudgeSeconds > 0, let m = ctx.store.activeManualSession, m.state == .running else { return [] }
+        let (nudgeSeconds, overflow) = ctx.store.settings.timerNudgeMinutes.multipliedReportingOverflow(by: 60)
+        guard !overflow, nudgeSeconds > 0, let m = ctx.store.activeManualSession, m.state == .running else { return [] }
         let active = m.activeSeconds(now: ctx.now)
         let n = active / nudgeSeconds
         guard n >= 1 else { return [] }
@@ -209,7 +221,7 @@ public enum InboxEngine {
 
     /// Open presence sessions older than `staleOpenSessionHours`.
     static func staleItems(_ ctx: Context) -> [InboxItem] {
-        let limit = TimeInterval(ctx.store.settings.staleOpenSessionHours * 3600)
+        let limit = TimeInterval(ctx.store.settings.staleOpenSessionHours) * 3600   // Double: never traps on overflow
         return ctx.store.presence
             .filter { $0.isOpen && ctx.now.timeIntervalSince($0.enteredAt) > limit }
             .map { s in
@@ -256,11 +268,14 @@ public enum InboxEngine {
 
     /// True when some presence session covers `instant` (open sessions run to `now`), within tolerance.
     static func isAccountedFor(_ instant: Date, in ctx: Context) -> Bool {
+        ctx.store.presence.contains { accounts($0, for: instant, now: ctx.now) }
+    }
+
+    /// True when `session` covers `instant` within `orphanExitToleranceSeconds` (an open session runs to `now`).
+    static func accounts(_ session: PresenceSession, for instant: Date, now: Date) -> Bool {
         let tol = orphanExitToleranceSeconds
-        return ctx.store.presence.contains { s in
-            let end = s.exitedAt ?? max(ctx.now, s.enteredAt)
-            return instant >= s.enteredAt.addingTimeInterval(-tol) && instant <= end.addingTimeInterval(tol)
-        }
+        let end = session.exitedAt ?? max(now, session.enteredAt)
+        return instant >= session.enteredAt.addingTimeInterval(-tol) && instant <= end.addingTimeInterval(tol)
     }
 
     // MARK: export:<yyyy-MM>

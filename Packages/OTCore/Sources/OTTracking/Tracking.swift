@@ -89,9 +89,11 @@ public enum GeofenceInterpreter {
     }
 
     /// The most recently closed session at the event's location when it ended less than
-    /// `flapMergeMinutes` before the event (and not after it). Nil when no flap applies.
+    /// `flapMergeMinutes` before the event (and not after it) and nothing else was recorded since
+    /// that exit. Nil when no flap applies.
     static func flapCandidateIndex(for event: LocationEvent, in store: Store) -> Int? {
-        let flapSeconds = TimeInterval(store.settings.flapMergeMinutes * 60)
+        // Double arithmetic: a corrupt or extreme setting must not trap on overflow.
+        let flapSeconds = TimeInterval(store.settings.flapMergeMinutes) * 60
         guard flapSeconds > 0 else { return nil }
         let candidates = store.presence.indices.filter {
             let s = store.presence[$0]
@@ -100,7 +102,14 @@ public enum GeofenceInterpreter {
         guard let j = candidates.max(by: { (store.presence[$0].exitedAt ?? .distantPast) < (store.presence[$1].exitedAt ?? .distantPast) }),
               let exitedAt = store.presence[j].exitedAt else { return nil }
         let sinceExit = event.at.timeIntervalSince(exitedAt)
-        return sinceExit >= 0 && sinceExit < flapSeconds ? j : nil
+        guard sinceExit >= 0 && sinceExit < flapSeconds else { return nil }
+        // A session that began at or after that exit (at any location, e.g. 20 s inside an adjacent
+        // plant's region) proves the device really left: the exit was no flap. Reviving the session
+        // would also make it overlap the later one, which the ledger resolves by cutting the revived
+        // session off at the later one's start (SPEC 4.7).
+        let candidate = store.presence[j]
+        let recordedSince = store.presence.contains { $0.id != candidate.id && $0.enteredAt >= exitedAt }
+        return recordedSince ? nil : j
     }
 
     /// Closes the session at `index` at `at`, clamped so it never ends before it began.

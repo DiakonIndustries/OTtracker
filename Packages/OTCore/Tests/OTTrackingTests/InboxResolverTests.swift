@@ -1,5 +1,6 @@
 import XCTest
 import OTModels
+import OTLedger
 @testable import OTTracking
 
 final class InboxResolverTests: XCTestCase {
@@ -19,15 +20,21 @@ final class InboxResolverTests: XCTestCase {
         let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30")
         let b = F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30")
         store.presence = [a, b]
-        let gap = item("gap:\(a.id.uuidString)", subject: a.id)
+        func inbox() -> [InboxItem] {
+            InboxEngine.items(store: store, dayResults: [Ledger.dayResult(store: store, day: day, now: now)], now: now)
+        }
+        let listed = inbox()
+        XCTAssertEqual(listed.map(\.key), ["gap:\(a.id.uuidString)"])
+        let gap = listed[0]
 
         XCTAssertEqual(InboxResolver.apply(.markGapWork, item: gap, store: &store, now: now), .applied)
         XCTAssertEqual(store.presenceSession(id: a.id)?.followingGapIsWork, true)
         XCTAssertNil(store.presenceSession(id: b.id)?.followingGapIsWork)
-        XCTAssertEqual(InboxEngine.items(store: store, dayResults: [F.workday("2026-10-14")], now: now), [], "resolved items disappear")
+        XCTAssertEqual(inbox(), [], "resolved items disappear")
 
         XCTAssertEqual(InboxResolver.apply(.markGapPersonal, item: gap, store: &store, now: now), .applied)
         XCTAssertEqual(store.presenceSession(id: a.id)?.followingGapIsWork, false)
+        XCTAssertEqual(inbox(), [])
         XCTAssertTrue(store.dismissedInboxKeys.isEmpty, "a fact changed, no dismissal needed")
     }
 
@@ -301,5 +308,72 @@ final class InboxResolverTests: XCTestCase {
         XCTAssertNotEqual(ResolutionOutcome.needsInput(.timeOffForm(.pto)), .needsInput(.timeOffForm(.flex)))
         XCTAssertNotEqual(ResolutionOutcome.applied, .notApplicable)
         XCTAssertNotEqual(InputKind.dateTime, .duration)
+    }
+
+    // MARK: Verification: removal, dangling subjects
+
+    func testRemovingTheSessionBehindAnExitItemDoesNotRaiseAnOrphanForItsExits() {
+        var store = F.store()
+        GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 07:02"), to: &store)
+        GeofenceInterpreter.apply(F.exit(F.plantA, "2026-10-14 11:30"), to: &store)     // flap at the lot edge
+        GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 11:31"), to: &store)
+        GeofenceInterpreter.apply(F.exit(F.plantA, "2026-10-14 17:42"), to: &store)
+        XCTAssertEqual(store.presence.count, 1)
+        func inbox() -> [InboxItem] {
+            InboxEngine.items(store: store, dayResults: [Ledger.dayResult(store: store, day: day, now: now)], now: now)
+        }
+        let exits = inbox().filter { $0.kind == .exit }
+        XCTAssertEqual(exits.count, 1)
+        XCTAssertEqual(inbox().filter { $0.kind == .orphanExit }, [])
+
+        XCTAssertEqual(InboxResolver.apply(.removeSession, item: exits[0], store: &store, now: now), .applied)
+        XCTAssertTrue(store.presence.isEmpty)
+        XCTAssertEqual(store.locationEvents.count, 4, "the audit log is never edited")
+        let after = inbox()
+        XCTAssertEqual(after.filter { $0.kind == .orphanExit }, [], "the exits were seen with the session the user just removed")
+        XCTAssertEqual(after.filter { $0.kind == .exit }, [])
+        XCTAssertEqual(after.map(\.kind), [.noShow], "with nothing recorded the day is honestly a no-show")
+    }
+
+    func testDeletingAStaleSessionLeavesUnrelatedOrphansAlone() {
+        var store = F.store()
+        let stale = F.session(F.plantA, "2026-10-13 07:00", nil)
+        store.presence = [stale]
+        let unrelated = F.exit(F.plantB, "2026-10-12 17:00")   // the day before the session began
+        store.locationEvents = [unrelated]
+        XCTAssertEqual(InboxResolver.apply(.deleteSession, item: item("stale:\(stale.id.uuidString)", kind: .staleOpen, subject: stale.id), store: &store, now: now), .applied)
+        XCTAssertTrue(store.dismissedInboxKeys.isEmpty)
+        XCTAssertEqual(InboxEngine.items(store: store, dayResults: [], now: now).map(\.subjectID), [unrelated.id])
+    }
+
+    func testEveryActionSurvivesADanglingSubject() throws {
+        let actions: [InboxAction] = [
+            .markGapWork, .markGapPersonal, .addTimeOff(kind: .pto), .addTimeOff(kind: .personal), .addTimeOff(kind: .flex),
+            .addTimeOff(kind: .other), .markRemoteDay, .enterHours, .excuseDay, .keepDeficit, .confirm, .adjustSession,
+            .removeSession, .countEarlyArrival, .dontCountEarlyArrival, .stillWorking, .stopTimerNow, .setTimerStop,
+            .setExitTime, .deleteSession, .setArrivalTime, .ignore, .emailExport, .shareExport, .dismiss,
+        ]
+        for action in actions {
+            var store = F.store()
+            store.presence = [F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 17:42")]
+            store.locationEvents = [F.exit(F.plantA, "2026-10-14 17:42")]
+            try ManualTimer.start(store: &store, category: "Home work", at: F.date("2026-10-14 09:00"))
+            let before = store
+            let dangling = item("x:\(UUID().uuidString)", kind: .exit, subject: UUID(), actions: [action])
+            let outcome = InboxResolver.apply(action, item: dangling, store: &store, now: now,
+                                              date: now, seconds: 3600, window: F.window("2026-10-14"))
+            XCTAssertEqual(store.presence, before.presence, "\(action) must not touch other sessions")
+            XCTAssertEqual(store.locationEvents, before.locationEvents, "\(action) must not touch the audit log")
+            XCTAssertEqual(store.activeManualSession?.id, before.activeManualSession?.id, "\(action) must not stop a timer it does not point at")
+            XCTAssertEqual(store.activeManualSession?.state, .running, "\(action)")
+            switch action {
+            case .markGapWork, .markGapPersonal, .setExitTime, .removeSession, .deleteSession, .setArrivalTime,
+                 .stopTimerNow, .setTimerStop, .emailExport, .shareExport:
+                XCTAssertEqual(outcome, .notApplicable, "\(action)")
+                XCTAssertEqual(store, before, "\(action)")
+            default:
+                XCTAssertNotEqual(outcome, .notApplicable, "\(action) does not depend on the subject")
+            }
+        }
     }
 }

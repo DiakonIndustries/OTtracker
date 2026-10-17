@@ -271,4 +271,53 @@ final class ManualTimerTests: XCTestCase {
         XCTAssertEqual(store.activeManualSession?.id, running.id)
         XCTAssertEqual(store.activeManualSession?.state, .running)
     }
+
+    // MARK: Verification: one-active invariant, zero-length edges
+
+    func testAtMostOneActiveSessionThroughEveryTransition() throws {
+        var store = F.store()
+        func activeCount() -> Int { store.manual.filter { !$0.isStopped }.count }
+        try ManualTimer.start(store: &store, category: "Home work", at: F.date("2026-10-14 19:00"))
+        XCTAssertEqual(activeCount(), 1)
+        assertThrows(.alreadyActive) { try ManualTimer.start(store: &store, category: "Travel", at: F.date("2026-10-14 19:01")) }
+        try ManualTimer.pause(store: &store, at: F.date("2026-10-14 19:30"))
+        XCTAssertEqual(activeCount(), 1)
+        assertThrows(.alreadyActive) { try ManualTimer.start(store: &store, category: "Travel", at: F.date("2026-10-14 19:31")) }
+        try ManualTimer.resume(store: &store, at: F.date("2026-10-14 19:45"))
+        ManualTimer.addBlock(store: &store, category: "Other", start: F.date("2026-10-14 08:00"), end: F.date("2026-10-14 09:00"), createdAt: F.date("2026-10-14 19:50"))
+        XCTAssertEqual(activeCount(), 1)
+        try ManualTimer.stop(store: &store, at: F.date("2026-10-14 20:00"))
+        XCTAssertEqual(activeCount(), 0)
+        XCTAssertNil(store.activeManualSession)
+        try ManualTimer.start(store: &store, category: "Travel", at: F.date("2026-10-14 21:00"))
+        XCTAssertEqual(activeCount(), 1)
+        try ManualTimer.discard(store: &store)
+        XCTAssertEqual(activeCount(), 0)
+        XCTAssertEqual(store.manual.count, 2)
+    }
+
+    func testCorruptStoreWithTwoActiveSessionsStillRefusesAThirdAndActsOnTheReportedOne() throws {
+        var store = F.store()
+        let first = ManualSession(category: "Home work", segments: [ManualSegment(start: F.date("2026-10-14 09:00"))], isStopped: false, createdAt: F.date("2026-10-14 09:00"))
+        let second = ManualSession(category: "Travel", segments: [ManualSegment(start: F.date("2026-10-14 10:00"))], isStopped: false, createdAt: F.date("2026-10-14 10:00"))
+        store.manual = [first, second]
+        assertThrows(.alreadyActive) { try ManualTimer.start(store: &store, category: "Other", at: F.date("2026-10-14 11:00")) }
+        XCTAssertEqual(store.activeManualSession?.id, first.id)
+        XCTAssertEqual(try ManualTimer.pause(store: &store, at: F.date("2026-10-14 11:00")).id, first.id)
+        XCTAssertEqual(store.manual[1], second)
+    }
+
+    func testPauseResumeStopExactlyAtSegmentStartYieldZeroSeconds() throws {
+        var store = F.store()
+        let at = F.date("2026-10-14 19:00")
+        try ManualTimer.start(store: &store, category: "Home work", at: at)
+        let paused = try ManualTimer.pause(store: &store, at: at)
+        XCTAssertEqual(paused.segments[0].end, at)
+        XCTAssertEqual(paused.activeSeconds(now: at.addingTimeInterval(3600)), 0)
+        let resumed = try ManualTimer.resume(store: &store, at: at)
+        XCTAssertEqual(resumed.segments[1].start, at)
+        let stopped = try ManualTimer.stop(store: &store, at: at)
+        XCTAssertEqual(stopped.segments.count, 2)
+        XCTAssertEqual(stopped.activeSeconds(now: at.addingTimeInterval(3600)), 0)
+    }
 }

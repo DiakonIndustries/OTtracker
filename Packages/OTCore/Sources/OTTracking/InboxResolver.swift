@@ -92,7 +92,12 @@ public enum InboxResolver {
 
         case .removeSession, .deleteSession:
             guard let i = presenceIndex(item, store) else { return .notApplicable }
-            store.presence.remove(at: i)
+            let removed = store.presence.remove(at: i)
+            // The exits this session accounted for were seen with it (the item was about them); the
+            // audit log keeps them, but they must not come back as `orphanExit` questions.
+            for e in store.locationEvents where e.kind == .exit && InboxEngine.accounts(removed, for: e.at, now: now) {
+                store.dismissInbox("orphanExit:\(e.id.uuidString)")
+            }
             return .applied
 
         case .addTimeOff(let kind):

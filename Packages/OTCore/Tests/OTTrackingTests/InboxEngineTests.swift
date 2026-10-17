@@ -1,5 +1,6 @@
 import XCTest
 import OTModels
+import OTLedger
 @testable import OTTracking
 
 final class InboxEngineTests: XCTestCase {
@@ -23,12 +24,19 @@ final class InboxEngineTests: XCTestCase {
 
     // MARK: gap
 
+    /// Real ledger results: gap items are derived from the ledger's own gap computation.
+    func ledger(_ store: Store, _ days: String...) -> [DayResult] {
+        days.map { Ledger.dayResult(store: store, day: F.day($0), now: now) }
+    }
+
     func testGapAtSameLocationIsDeducted() {
         var store = F.store()
         let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30")
         let b = F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30")
         store.presence = [b, a]   // order in the store must not matter
-        let list = items(store, [F.workday("2026-10-14")])
+        let results = ledger(store, "2026-10-14")
+        XCTAssertTrue(results[0].flags.contains(.gapUndecided))
+        let list = items(store, results)
 
         XCTAssertEqual(list.count, 1)
         let item = list[0]
@@ -41,6 +49,7 @@ final class InboxEngineTests: XCTestCase {
         XCTAssertEqual(item.defaultApplied, "Deducted 1h 10m")
         XCTAssertEqual(item.actions, [.markGapWork, .markGapPersonal])
         XCTAssertEqual(item.subjectID, a.id)
+        XCTAssertEqual(results[0].gapsDeductedSeconds, 70 * 60, "the item says what the ledger did")
     }
 
     func testGapToDifferentLocationCountsAsWork() {
@@ -48,11 +57,13 @@ final class InboxEngineTests: XCTestCase {
         let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30")
         let b = F.session(F.plantB, "2026-10-14 12:40", "2026-10-14 15:30")
         store.presence = [a, b]
-        let list = only(.gap, in: items(store, [F.workday("2026-10-14")]))
+        let results = ledger(store, "2026-10-14")
+        let list = only(.gap, in: items(store, results))
         XCTAssertEqual(list.count, 1)
         XCTAssertEqual(list[0].defaultApplied, "Counted as work")
         XCTAssertEqual(list[0].detail, "Left Plant A, arrived at Plant B · 1h 10m")
         XCTAssertEqual(list[0].subjectID, a.id)
+        XCTAssertEqual(results[0].gapsWorkSeconds, 70 * 60)
     }
 
     func testGapWithDecisionIsNotRaised() {
@@ -61,9 +72,9 @@ final class InboxEngineTests: XCTestCase {
             F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30", gapIsWork: false),
             F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30"),
         ]
-        XCTAssertEqual(items(store, [F.workday("2026-10-14")]), [])
+        XCTAssertEqual(items(store, ledger(store, "2026-10-14")), [])
         store.presence[0].followingGapIsWork = true
-        XCTAssertEqual(items(store, [F.workday("2026-10-14")]), [])
+        XCTAssertEqual(items(store, ledger(store, "2026-10-14")), [])
     }
 
     func testGapOutsideWindowIsNotRaised() {
@@ -72,12 +83,12 @@ final class InboxEngineTests: XCTestCase {
             F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 15:30"),
             F.session(F.plantA, "2026-10-14 18:00", "2026-10-14 19:00"),   // evening return, after the window
         ]
-        XCTAssertEqual(only(.gap, in: items(store, [F.workday("2026-10-14")])), [])
+        XCTAssertEqual(only(.gap, in: items(store, ledger(store, "2026-10-14"))), [])
         store.presence = [
             F.session(F.plantA, "2026-10-14 05:00", "2026-10-14 06:00"),   // pre-dawn visit, before the window
             F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 15:30"),
         ]
-        XCTAssertEqual(only(.gap, in: items(store, [F.workday("2026-10-14")])), [])
+        XCTAssertEqual(only(.gap, in: items(store, ledger(store, "2026-10-14"))), [])
     }
 
     func testGapPartlyInsideWindowDeductsOnlyTheInsidePart() {
@@ -86,7 +97,7 @@ final class InboxEngineTests: XCTestCase {
             F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 15:00"),
             F.session(F.plantA, "2026-10-14 16:00", "2026-10-14 17:00"),
         ]
-        let list = only(.gap, in: items(store, [F.workday("2026-10-14")]))
+        let list = only(.gap, in: items(store, ledger(store, "2026-10-14")))
         XCTAssertEqual(list.count, 1)
         XCTAssertEqual(list[0].defaultApplied, "Deducted 30m")
         XCTAssertEqual(list[0].detail, "Left Plant A, returned to Plant A · 1h")
@@ -100,13 +111,18 @@ final class InboxEngineTests: XCTestCase {
         ]
         XCTAssertEqual(items(store, []), [])
         XCTAssertEqual(items(store, [F.offDay("2026-10-14")]), [])
+        // The ledger's `.gapUndecided` flag drives gap items; a result without it raises none.
+        XCTAssertEqual(items(store, [F.workday("2026-10-14")]), [])
+        // A real day off has no window, so the ledger has no gap either.
+        store.setOverride(DayOverride(day: F.day("2026-10-14"), kind: .dayOff))
+        XCTAssertEqual(items(store, ledger(store, "2026-10-14")), [])
     }
 
     func testGapBeforeAnOpenSessionIsRaised() {
         var store = F.store()
         let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30")
         store.presence = [a, F.session(F.plantA, "2026-10-14 12:40", nil)]
-        let list = only(.gap, in: items(store, [F.workday("2026-10-14")]))
+        let list = only(.gap, in: items(store, ledger(store, "2026-10-14")))
         XCTAssertEqual(list.map(\.key), ["gap:\(a.id.uuidString)"])
     }
 
@@ -116,7 +132,9 @@ final class InboxEngineTests: XCTestCase {
             F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 23:00"),
             F.session(F.plantA, "2026-10-15 01:00", "2026-10-15 02:00"),
         ]
-        XCTAssertEqual(only(.gap, in: items(store, [F.workday("2026-10-14"), F.workday("2026-10-15")])), [])
+        let later = F.date("2026-10-15 18:00")
+        let results = [F.day("2026-10-14"), F.day("2026-10-15")].map { Ledger.dayResult(store: store, day: $0, now: later) }
+        XCTAssertEqual(only(.gap, in: items(store, results, now: later)), [])
     }
 
     func testOverlappingSessionsProduceNoGap() {
@@ -125,7 +143,63 @@ final class InboxEngineTests: XCTestCase {
             F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 12:00"),
             F.session(F.plantB, "2026-10-14 11:00", "2026-10-14 15:30"),
         ]
-        XCTAssertEqual(only(.gap, in: items(store, [F.workday("2026-10-14")])), [])
+        let results = ledger(store, "2026-10-14")
+        XCTAssertTrue(results[0].flags.contains(.overlappingLocations))
+        XCTAssertEqual(only(.gap, in: items(store, results)), [])
+    }
+
+    func testNestedSessionsAtSameLocationKeyTheGapOnTheSessionThatEndsTheBlock() {
+        // A hand-entered session inside the geofence one: the ledger merges them (SPEC 4.7) and reads
+        // the decision from the session that ends the merged block, deducting 12:00–13:00 only.
+        var store = F.store()
+        let outer = F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 12:00")
+        let inner = F.session(F.plantA, "2026-10-14 08:00", "2026-10-14 09:00", source: .manual)
+        let afternoon = F.session(F.plantA, "2026-10-14 13:00", "2026-10-14 15:30")
+        store.presence = [inner, outer, afternoon]
+        let results = ledger(store, "2026-10-14")
+        XCTAssertEqual(results[0].gapsDeductedSeconds, 3600)
+        let list = only(.gap, in: items(store, results))
+        XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list[0].key, "gap:\(outer.id.uuidString)")
+        XCTAssertEqual(list[0].title, "Away 12:00 PM – 1:00 PM")
+        XCTAssertEqual(list[0].detail, "Left Plant A, returned to Plant A · 1h")
+        XCTAssertEqual(list[0].defaultApplied, "Deducted 1h")
+
+        // Resolving the item is what changes the ledger.
+        store.presence[1].followingGapIsWork = true
+        let decided = ledger(store, "2026-10-14")
+        XCTAssertEqual(decided[0].gapsDeductedSeconds, 0)
+        XCTAssertEqual(decided[0].gapsWorkSeconds, 3600)
+        XCTAssertEqual(only(.gap, in: items(store, decided)), [])
+    }
+
+    func testRegularManualTimeBridgingTheGapRaisesNothing() {
+        var store = F.store()
+        store.presence = [
+            F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 11:30"),
+            F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30"),
+        ]
+        ManualTimer.addBlock(store: &store, category: "Home work", countsAs: .regular,
+                             start: F.date("2026-10-14 11:30"), end: F.date("2026-10-14 12:40"), createdAt: now)
+        let results = ledger(store, "2026-10-14")
+        XCTAssertEqual(results[0].gapsDeductedSeconds, 0, "regular manual time is presence (SPEC 4.2)")
+        XCTAssertEqual(items(store, results), [])
+    }
+
+    func testGapIntoRegularManualTimeIsKeyedOnThePresenceSession() {
+        var store = F.store()
+        let a = F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 11:30")
+        store.presence = [a, F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30")]
+        ManualTimer.addBlock(store: &store, category: "Home work", countsAs: .regular,
+                             start: F.date("2026-10-14 12:00"), end: F.date("2026-10-14 12:30"), createdAt: now)
+        let results = ledger(store, "2026-10-14")
+        // 11:30–12:00 follows A and can be decided; 12:30–12:40 follows the manual block and has no session to carry a decision.
+        XCTAssertEqual(results[0].gapsDeductedSeconds, 30 * 60 + 10 * 60)
+        let list = only(.gap, in: items(store, results))
+        XCTAssertEqual(list.map(\.key), ["gap:\(a.id.uuidString)"])
+        XCTAssertEqual(list[0].title, "Away 11:30 AM – 12:00 PM")
+        XCTAssertEqual(list[0].detail, "Left Plant A, resumed with manual time · 30m")
+        XCTAssertEqual(list[0].defaultApplied, "Deducted 30m")
     }
 
     func testGapsOnSeveralDaysAreAllRaised() {
@@ -136,7 +210,7 @@ final class InboxEngineTests: XCTestCase {
             F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 11:30"),
             F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30"),
         ]
-        let list = only(.gap, in: items(store, [F.workday("2026-10-13"), F.workday("2026-10-14")]))
+        let list = only(.gap, in: items(store, ledger(store, "2026-10-13", "2026-10-14")))
         XCTAssertEqual(list.count, 2)
         XCTAssertEqual(list.map(\.day), [F.day("2026-10-14"), F.day("2026-10-13")], "newest first")
         XCTAssertEqual(list[1].defaultApplied, "Deducted 1h")
@@ -145,7 +219,7 @@ final class InboxEngineTests: XCTestCase {
     func testSingleSessionProducesNoGap() {
         var store = F.store()
         store.presence = [F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 15:30")]
-        XCTAssertEqual(items(store, [F.workday("2026-10-14")]), [])
+        XCTAssertEqual(items(store, ledger(store, "2026-10-14")), [])
     }
 
     // MARK: noshow
@@ -278,6 +352,31 @@ final class InboxEngineTests: XCTestCase {
         XCTAssertEqual(list[0].title, "Left Plant A 2:00 AM")
     }
 
+    func testExitItemSuppressedWhileAnotherSessionStillCoversTheDay() {
+        var store = F.store()
+        let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 15:00")
+        let result = F.workday("2026-10-14") { r in r.earlyExitSeconds = 1800 }
+        store.presence = [a, F.session(F.plantB, "2026-10-14 14:00", nil)]   // overlapping, still open
+        XCTAssertEqual(only(.exit, in: items(store, [result])), [], "the ledger's last exit is `now`, not this departure")
+        store.presence = [a, F.session(F.plantB, "2026-10-12 07:00", nil)]   // a forgotten open session from Monday
+        XCTAssertEqual(only(.exit, in: items(store, [result])), [])
+        XCTAssertEqual(only(.staleOpen, in: items(store, [result])).count, 1, "the stale item is the one to answer first")
+        store.presence = [a]
+        XCTAssertEqual(only(.exit, in: items(store, [result])).map(\.subjectID), [a.id])
+    }
+
+    func testExitItemSuppressedByRegularManualTimeAfterTheExit() {
+        var store = F.store()
+        let s = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 15:00")
+        store.presence = [s]
+        let result = F.workday("2026-10-14") { r in r.extraAfterSeconds = 3600 }
+        ManualTimer.addBlock(store: &store, category: "Home work", countsAs: .regular,
+                             start: F.date("2026-10-14 15:00"), end: F.date("2026-10-14 16:30"), createdAt: now)
+        XCTAssertEqual(only(.exit, in: items(store, [result])), [], "regular manual time is presence; the +1h is not this exit's")
+        store.manual[0].countsAs = .extra
+        XCTAssertEqual(only(.exit, in: items(store, [result])).map(\.subjectID), [s.id], "extra manual time never joins presence")
+    }
+
     // MARK: early
 
     func testEarlyArrivalItem() {
@@ -408,6 +507,23 @@ final class InboxEngineTests: XCTestCase {
         XCTAssertEqual(list[0].detail, "Arrived Sat Oct 31 8:00 PM · no exit for 17h")
     }
 
+    func testExtremeNudgeAndStaleSettingsDoNotTrap() throws {
+        var store = F.store()
+        try ManualTimer.start(store: &store, category: "Home work", at: F.date("2026-10-14 09:00"))
+        store.presence = [F.session(F.plantA, "2026-10-01 07:00", nil)]
+        for value in [Int.max, Int.min, -1] {
+            store.settings.timerNudgeMinutes = value
+            store.settings.staleOpenSessionHours = value
+            let list = items(store)
+            XCTAssertEqual(only(.timer, in: list), [], "\(value)")
+            if value > 0 {
+                XCTAssertEqual(only(.staleOpen, in: list), [], "\(value)")
+            } else {
+                XCTAssertEqual(only(.staleOpen, in: list).count, 1, "a negative limit makes every open session stale (\(value))")
+            }
+        }
+    }
+
     // MARK: orphanExit
 
     func testOrphanExitItem() {
@@ -515,7 +631,7 @@ final class InboxEngineTests: XCTestCase {
         var store = F.store()
         let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30")
         store.presence = [a, F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30")]
-        let result = F.workday("2026-10-14") { r in r.flags = [.earlyArrivalUncounted]; r.extraBeforeSeconds = 600 }
+        let result = F.workday("2026-10-14") { r in r.flags = [.earlyArrivalUncounted, .gapUndecided]; r.extraBeforeSeconds = 600 }
         XCTAssertEqual(items(store, [result], exports: ["2026-09"]).count, 3)
 
         store.dismissInbox("export:2026-09")
@@ -530,22 +646,68 @@ final class InboxEngineTests: XCTestCase {
         let a = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30")
         let last = F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 17:42")
         store.presence = [a, last]
-        let stale = F.session(F.plantB, "2026-10-12 07:00", nil)
-        store.presence.append(stale)
+        let orphan = F.exit(F.plantB, "2026-10-12 17:00")
+        store.locationEvents = [orphan]
         let timer = try ManualTimer.start(store: &store, category: "Home work", at: F.date("2026-10-14 13:00"))
         let results = [
-            F.workday("2026-10-14") { r in r.extraAfterSeconds = 2520 },
+            F.workday("2026-10-14") { r in r.extraAfterSeconds = 2520; r.flags = [.gapUndecided] },
             F.workday("2026-10-13") { r in r.flags = [.noShow]; r.deltaSeconds = -30_600 },
         ]
         let list = items(store, results, exports: ["2026-09"])
         XCTAssertEqual(list.map(\.key), [
-            "timer:\(timer.id.uuidString):1",   // now (18:00)
-            "exit:\(last.id.uuidString)",       // 17:42
-            "gap:\(a.id.uuidString)",           // 11:30
-            "noshow:2026-10-13",                // 10-13 15:30
-            "stale:\(stale.id.uuidString)",     // 10-12 07:00
-            "export:2026-09",                   // 10-01 00:00
+            "timer:\(timer.id.uuidString):1",       // now (18:00)
+            "exit:\(last.id.uuidString)",           // 17:42
+            "gap:\(a.id.uuidString)",               // 11:30
+            "noshow:2026-10-13",                    // 10-13 15:30
+            "orphanExit:\(orphan.id.uuidString)",   // 10-12 17:00
+            "export:2026-09",                       // 10-01 00:00
         ])
+        XCTAssertEqual(list.map(\.occurredAt), list.map(\.occurredAt).sorted(by: >))
+    }
+
+    func testStaleItemSortsByItsArrival() {
+        var store = F.store()
+        let stale = F.session(F.plantB, "2026-10-12 07:00", nil)
+        store.presence = [stale]
+        let results = [F.workday("2026-10-13") { r in r.flags = [.noShow]; r.deltaSeconds = -30_600 }]
+        XCTAssertEqual(items(store, results, exports: ["2026-09"]).map(\.key),
+                       ["noshow:2026-10-13", "stale:\(stale.id.uuidString)", "export:2026-09"])
+    }
+
+    func testOutputIsIdenticalAcrossRepeatedCalls() {
+        var store = F.store()
+        store.presence = [
+            F.session(F.plantA, "2026-10-13 07:00", "2026-10-13 11:00"),
+            F.session(F.plantA, "2026-10-13 12:00", "2026-10-13 15:30"),
+            F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 11:30"),
+            F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 17:42"),
+        ]
+        let results = ledger(store, "2026-10-08", "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14")
+        let first = items(store, results, exports: ["2026-09", "2026-08"])
+        XCTAssertEqual(Set(first.map(\.kind)), [.gap, .noShow, .exit, .monthlyExport])
+        XCTAssertEqual(first.count, 8)
+        for _ in 0..<20 { XCTAssertEqual(items(store, results, exports: ["2026-09", "2026-08"]), first) }
+    }
+
+    func testFiveYearsOfLunchGapsWithSixtyDaysOfResults() {
+        // Every workday for five years has an undecided lunch gap; the Inbox asks about the ones in range only.
+        var store = F.store()
+        let cal = F.calendar
+        var day = F.day("2021-10-18")
+        while day <= F.day("2026-10-14") {
+            if (2...6).contains(day.weekday(in: cal).rawValue) {
+                store.presence.append(PresenceSession(locationID: F.plantA, enteredAt: TimeOfDay(hour: 7).date(on: day, calendar: cal),
+                                                      exitedAt: TimeOfDay(hour: 11, minute: 30).date(on: day, calendar: cal)))
+                store.presence.append(PresenceSession(locationID: F.plantA, enteredAt: TimeOfDay(hour: 12, minute: 10).date(on: day, calendar: cal),
+                                                      exitedAt: TimeOfDay(hour: 15, minute: 30).date(on: day, calendar: cal)))
+            }
+            day = day.adding(days: 1, calendar: cal)
+        }
+        XCTAssertGreaterThan(store.presence.count, 2500)
+        let results = Ledger.dayResults(store: store, from: F.day("2026-08-16"), through: F.day("2026-10-14"), now: now)
+        let list = items(store, results)
+        XCTAssertEqual(list.map(\.kind), Array(repeating: .gap, count: 43), "43 workdays from Mon 08-17 through Wed 10-14")
+        XCTAssertEqual(Set(list.map(\.defaultApplied)), ["Deducted 40m"])
         XCTAssertEqual(list.map(\.occurredAt), list.map(\.occurredAt).sorted(by: >))
     }
 
@@ -566,6 +728,23 @@ final class InboxEngineTests: XCTestCase {
         let list = items(store, [result], now: F.date("2026-10-14 18:00"))
         XCTAssertEqual(list.map(\.title), ["Left Plant A 2:42 PM"])
         XCTAssertEqual(list[0].day, F.day("2026-10-14"))
+    }
+
+    func testFormattingUsesTheStoreTimeZoneFarFromUTC() {
+        var store = F.store()
+        store.settings.timeZoneIdentifier = "Pacific/Auckland"
+        // 2026-10-14 17:42 New York is 21:42 UTC, which is 10:42 AM on Thursday 2026-10-15 in Auckland (NZDT, UTC+13).
+        let s = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 17:42")
+        store.presence = [s]
+        let orphan = F.exit(F.plantB, "2026-10-14 06:00")   // 10:00 UTC = 11:00 PM on Wed 2026-10-14 in Auckland
+        store.locationEvents = [orphan]
+        let aucklandDay = F.day("2026-10-15")
+        let result = DayResult(day: aucklandDay, kind: .workday, extraAfterSeconds: 2520)
+        let list = items(store, [result], now: F.date("2026-10-14 18:00"))   // 11:00 AM NZDT on 2026-10-15
+        XCTAssertEqual(list.map(\.title), ["Left Plant A 10:42 AM", "Left Plant B 11:00 PM with no arrival"])
+        XCTAssertEqual(list[0].day, aucklandDay)
+        XCTAssertEqual(list[1].day, F.day("2026-10-14"))
+        XCTAssertEqual(list[1].detail, "No open session on Wed Oct 14 · set the arrival time to record the day")
     }
 
     func testUnknownLocationNameFallsBack() {
@@ -595,18 +774,41 @@ final class InboxEngineTests: XCTestCase {
     }
 
     func testGapOnFallBackDayUsesRealSeconds() {
+        // Sunday 2026-11-01 made a 00:30–06:00 workday by override. Away from 01:00 EDT to 01:30 EST:
+        // the clock shows 30 minutes, 1h 30m really passed, and the item says so.
         var store = F.store()
-        // Away from 01:00 EDT to 01:30 EST: the clock shows 30 minutes, 1h 30m really passed.
+        let day = F.day("2026-11-01")
+        store.setOverride(DayOverride(day: day, kind: .schedule(WeekdaySchedule(start: TimeOfDay(hour: 0, minute: 30), end: TimeOfDay(hour: 6)))))
         let a = PresenceSession(locationID: F.plantA, enteredAt: F.iso("2026-10-31T22:00:00-04:00"), exitedAt: F.iso("2026-11-01T01:00:00-04:00"))
         let b = PresenceSession(locationID: F.plantA, enteredAt: F.iso("2026-11-01T01:30:00-05:00"), exitedAt: F.iso("2026-11-01T06:00:00-05:00"))
         store.presence = [a, b]
-        let nightWindow = Interval(start: F.iso("2026-10-31T22:00:00-04:00").addingTimeInterval(3600), end: F.iso("2026-11-01T06:00:00-05:00"))
-        let result = DayResult(day: F.day("2026-11-01"), kind: .workday, scheduledWindow: nightWindow)
-        let list = only(.gap, in: items(store, [result], now: F.iso("2026-11-01T12:00:00-05:00")))
+        let at = F.iso("2026-11-01T12:00:00-05:00")
+        let results = [Ledger.dayResult(store: store, day: day, now: at)]
+        XCTAssertEqual(results[0].scheduledWindow?.seconds, 6 * 3600 + 30 * 60, "00:30 EDT to 06:00 EST is 6h 30m of real time")
+        let list = only(.gap, in: items(store, results, now: at))
         XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list[0].subjectID, a.id)
         XCTAssertEqual(list[0].defaultApplied, "Deducted 1h 30m")
         XCTAssertEqual(list[0].title, "Away 1:00 AM – 1:30 AM")
-        XCTAssertEqual(list[0].day, F.day("2026-11-01"))
+        XCTAssertEqual(list[0].day, day)
+    }
+
+    func testGapOnSpringForwardDayUsesRealSeconds() {
+        // Sunday 2026-03-08 made a 01:00–05:00 workday by override; 02:00–03:00 does not exist that night.
+        var store = F.store()
+        let day = F.day("2026-03-08")
+        store.setOverride(DayOverride(day: day, kind: .schedule(WeekdaySchedule(start: TimeOfDay(hour: 1), end: TimeOfDay(hour: 5)))))
+        let a = PresenceSession(locationID: F.plantA, enteredAt: F.iso("2026-03-08T00:30:00-05:00"), exitedAt: F.iso("2026-03-08T01:30:00-05:00"))
+        let b = PresenceSession(locationID: F.plantA, enteredAt: F.iso("2026-03-08T03:30:00-04:00"), exitedAt: F.iso("2026-03-08T05:00:00-04:00"))
+        store.presence = [a, b]
+        let at = F.iso("2026-03-08T12:00:00-04:00")
+        let results = [Ledger.dayResult(store: store, day: day, now: at)]
+        XCTAssertEqual(results[0].scheduledWindow?.seconds, 3 * 3600, "01:00 EST to 05:00 EDT is 3 real hours")
+        let list = only(.gap, in: items(store, results, now: at))
+        XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list[0].defaultApplied, "Deducted 1h", "01:30 EST to 03:30 EDT is one real hour")
+        XCTAssertEqual(list[0].title, "Away 1:30 AM – 3:30 AM")
+        XCTAssertEqual(list[0].day, day)
     }
 
     func testTodayOrYesterdayAcrossSpringForward() {
