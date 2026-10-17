@@ -105,17 +105,19 @@ final class InboxEngineTests: XCTestCase {
 
     func testGapWithoutDayResultOrWindowIsNotRaised() {
         var store = F.store()
-        store.presence = [
-            F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30"),
-            F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30"),
-        ]
+        let last = F.session(F.plantA, "2026-10-14 12:40", "2026-10-14 15:30")
+        store.presence = [F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 11:30"), last]
         XCTAssertEqual(items(store, []), [])
-        XCTAssertEqual(items(store, [F.offDay("2026-10-14")]), [])
+        // On a day without a window there is no gap; the final departure is an exit item instead (SPEC 4.4 / 5.3).
+        XCTAssertEqual(only(.gap, in: items(store, [F.offDay("2026-10-14")])), [])
+        XCTAssertEqual(items(store, [F.offDay("2026-10-14")]).map(\.key), ["exit:\(last.id.uuidString)"])
         // The ledger's `.gapUndecided` flag drives gap items; a result without it raises none.
         XCTAssertEqual(items(store, [F.workday("2026-10-14")]), [])
-        // A real day off has no window, so the ledger has no gap either.
+        // A real day off has no window, so the ledger has no gap either; all presence counts.
         store.setOverride(DayOverride(day: F.day("2026-10-14"), kind: .dayOff))
-        XCTAssertEqual(items(store, ledger(store, "2026-10-14")), [])
+        let dayOff = items(store, ledger(store, "2026-10-14"))
+        XCTAssertEqual(dayOff.map(\.kind), [.exit])
+        XCTAssertEqual(dayOff[0].detail, "+2h 50m")
     }
 
     func testGapBeforeAnOpenSessionIsRaised() {
@@ -375,6 +377,122 @@ final class InboxEngineTests: XCTestCase {
         XCTAssertEqual(only(.exit, in: items(store, [result])), [], "regular manual time is presence; the +1h is not this exit's")
         store.manual[0].countsAs = .extra
         XCTAssertEqual(only(.exit, in: items(store, [result])).map(\.subjectID), [s.id], "extra manual time never joins presence")
+    }
+
+    func testExitItemOnAWeekendAddsTheSessionsOwnTime() {
+        // SPEC 2 / 4.4: weekend presence all counts, so the exit moved the delta by the whole session.
+        var store = F.store()
+        let s = F.session(F.plantA, "2026-10-10 10:00", "2026-10-10 13:10")
+        store.presence = [s]
+        let saturday = F.date("2026-10-10 18:00")
+        let results = [Ledger.dayResult(store: store, day: F.day("2026-10-10"), now: saturday)]
+        XCTAssertEqual(results[0].kind, .weekend)
+        XCTAssertEqual(results[0].deltaSeconds, 3 * 3600 + 600)
+        let list = items(store, results, now: saturday)
+        XCTAssertEqual(list.count, 1)
+        let item = list[0]
+        XCTAssertEqual(item.key, "exit:\(s.id.uuidString)")
+        XCTAssertEqual(item.kind, .exit)
+        XCTAssertEqual(item.title, "Left Plant A 1:10 PM")
+        XCTAssertEqual(item.detail, "+3h 10m")
+        XCTAssertEqual(item.defaultApplied, "Added 3h 10m")
+        XCTAssertEqual(item.actions, [.confirm, .adjustSession, .removeSession])
+        XCTAssertEqual(item.subjectID, s.id)
+        XCTAssertEqual(item.day, F.day("2026-10-10"))
+        XCTAssertEqual(item.occurredAt, F.date("2026-10-10 13:10"))
+        // Seen on Sunday it is still yesterday's departure; on Monday it is gone.
+        XCTAssertEqual(only(.exit, in: items(store, results, now: F.date("2026-10-11 09:00"))).count, 1)
+        XCTAssertEqual(only(.exit, in: items(store, results, now: F.date("2026-10-12 09:00"))), [])
+        // Hand-entered and imported sessions never raise it, on any kind of day.
+        store.presence = [F.session(F.plantA, "2026-10-10 10:00", "2026-10-10 13:10", source: .manual)]
+        XCTAssertEqual(only(.exit, in: items(store, results, now: saturday)), [])
+    }
+
+    func testExitItemOnAHolidayAndADayOffAddsTheSessionsOwnTime() {
+        var store = F.store()
+        store.holidays = [Holiday(day: F.day("2026-10-14"), name: "Founders' Day")]
+        let s = F.session(F.plantB, "2026-10-14 10:00", "2026-10-14 13:10")
+        store.presence = [s]
+        let holiday = ledger(store, "2026-10-14")
+        XCTAssertEqual(holiday[0].kind, .holiday)
+        let list = items(store, holiday)
+        XCTAssertEqual(list.map(\.key), ["exit:\(s.id.uuidString)"])
+        XCTAssertEqual(list[0].title, "Left Plant B 1:10 PM")
+        XCTAssertEqual(list[0].detail, "+3h 10m")
+        XCTAssertEqual(list[0].defaultApplied, "Added 3h 10m")
+        store.holidays = []
+        store.setOverride(DayOverride(day: F.day("2026-10-14"), kind: .dayOff))
+        let dayOff = ledger(store, "2026-10-14")
+        XCTAssertEqual(dayOff[0].kind, .dayOff)
+        XCTAssertEqual(items(store, dayOff).map(\.detail), ["+3h 10m"])
+        // A weekday with the same session is unchanged: late arrival and early exit, the exit item says −2h 20m.
+        store.overrides = []
+        let weekday = ledger(store, "2026-10-14")
+        XCTAssertEqual(weekday[0].kind, .workday)
+        XCTAssertEqual(weekday[0].earlyExitSeconds, 2 * 3600 + 20 * 60)
+        let weekdayItems = only(.exit, in: items(store, weekday))
+        XCTAssertEqual(weekdayItems.map(\.detail), ["\u{2212}2h 20m"])
+        XCTAssertEqual(weekdayItems[0].defaultApplied, "Deducted 2h 20m")
+    }
+
+    func testExitItemOnANoWindowDayIsStillOnlyTheFinalDeparture() {
+        var store = F.store()
+        let morning = F.session(F.plantA, "2026-10-10 09:00", "2026-10-10 11:00")
+        let afternoon = F.session(F.plantA, "2026-10-10 12:00", "2026-10-10 13:10")
+        store.presence = [afternoon, morning]
+        let saturday = F.date("2026-10-10 18:00")
+        let results = [Ledger.dayResult(store: store, day: F.day("2026-10-10"), now: saturday)]
+        XCTAssertEqual(results[0].deltaSeconds, 3 * 3600 + 600)
+        let list = only(.exit, in: items(store, results, now: saturday))
+        XCTAssertEqual(list.map(\.subjectID), [afternoon.id])
+        XCTAssertEqual(list[0].detail, "+1h 10m", "the item is about this session's own time, not the day's total")
+        // Still there: the morning exit is not the departure and the open session has no exit.
+        store.presence = [morning, F.session(F.plantA, "2026-10-10 12:00", nil)]
+        let open = [Ledger.dayResult(store: store, day: F.day("2026-10-10"), now: saturday)]
+        XCTAssertEqual(only(.exit, in: items(store, open, now: saturday)), [])
+    }
+
+    func testExitItemOnANoWindowDayClipsASessionToTheExitDay() {
+        // Friday night into Saturday morning: the exit is on Saturday, and only Saturday's two hours are its effect.
+        var store = F.store()
+        let night = F.session(F.plantA, "2026-10-09 22:00", "2026-10-10 02:00")
+        store.presence = [night]
+        let saturday = F.date("2026-10-10 10:00")
+        let results = [F.day("2026-10-09"), F.day("2026-10-10")].map { Ledger.dayResult(store: store, day: $0, now: saturday) }
+        let list = only(.exit, in: items(store, results, now: saturday))
+        XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list[0].day, F.day("2026-10-10"))
+        XCTAssertEqual(list[0].title, "Left Plant A 2:00 AM")
+        XCTAssertEqual(list[0].detail, "+2h")
+        XCTAssertEqual(InboxEngine.exitEffectSeconds(for: night, dayResult: results[1], store: store, now: saturday), 7200)
+    }
+
+    func testExitEffectSecondsIsTheOneSourceForInboxAndNotification() {
+        var store = F.store()
+        let late = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 17:42")
+        let early = F.session(F.plantA, "2026-10-14 07:02", "2026-10-14 15:12")
+        let exact = F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 15:30")
+        let open = F.session(F.plantA, "2026-10-14 07:00", nil)
+        // Window days read the day result's boundary terms.
+        XCTAssertEqual(InboxEngine.exitEffectSeconds(for: late, dayResult: F.workday("2026-10-14") { $0.extraAfterSeconds = 2520 }, store: store, now: now), 2520)
+        XCTAssertEqual(InboxEngine.exitEffectSeconds(for: early, dayResult: F.workday("2026-10-14") { $0.earlyExitSeconds = 1080 }, store: store, now: now), -1080)
+        XCTAssertNil(InboxEngine.exitEffectSeconds(for: exact, dayResult: F.workday("2026-10-14"), store: store, now: now))
+        XCTAssertNil(InboxEngine.exitEffectSeconds(for: open, dayResult: F.workday("2026-10-14") { $0.extraAfterSeconds = 2520 }, store: store, now: now), "an open session has no exit")
+        // No-window days: the session's own presence on that day.
+        let weekend = F.session(F.plantA, "2026-10-10 10:00", "2026-10-10 13:10")
+        XCTAssertEqual(InboxEngine.exitEffectSeconds(for: weekend, dayResult: F.offDay("2026-10-10"), store: store, now: now), 3 * 3600 + 600)
+        XCTAssertNil(InboxEngine.exitEffectSeconds(for: weekend, dayResult: F.offDay("2026-10-11"), store: store, now: now), "not on that day")
+        XCTAssertNil(InboxEngine.exitEffectSeconds(for: F.session(F.plantA, "2026-10-10 10:00", "2026-10-10 10:00"), dayResult: F.offDay("2026-10-10"), store: store, now: now))
+        // In-progress day: the provisional early exit is reported and matches the item, from the real ledger.
+        let left = F.session(F.plantA, "2026-10-14 07:00", "2026-10-14 14:00")
+        store.presence = [left]
+        let midAfternoon = F.date("2026-10-14 14:30")
+        let result = Ledger.dayResult(store: store, day: F.day("2026-10-14"), now: midAfternoon)
+        XCTAssertEqual(result.earlyExitSeconds, 1800)
+        XCTAssertEqual(InboxEngine.exitEffectSeconds(for: left, dayResult: result, store: store, now: midAfternoon), -1800)
+        let list = only(.exit, in: items(store, [result], now: midAfternoon))
+        XCTAssertEqual(list.map(\.detail), ["\u{2212}30m"])
+        XCTAssertEqual(list[0].defaultApplied, "Deducted 30m")
     }
 
     // MARK: early

@@ -378,8 +378,8 @@ final class GeofenceInterpreterTests: XCTestCase {
 
     func testFlapDoesNotReopenWhenAnotherSessionWasRecordedSinceTheExit() {
         // Out of A's region, 20 s inside the adjacent plant B's region, back into A within the flap
-        // window: the device really left, so A's exit stands. Reopening A would make it overlap B and
-        // the ledger's "later location wins" rule (SPEC 4.7) would cut A off at 12:00:30 for the day.
+        // window: the device really left, so A's exit stands. Reopening A would make it overlap B, which
+        // the ledger would merge into one block and flag `.overlappingLocations` (SPEC 4.7).
         var store = F.store()
         GeofenceInterpreter.apply(F.enter(F.plantA, "2026-10-14 07:02"), to: &store)
         GeofenceInterpreter.apply(F.exit(F.plantA, "2026-10-14 12:00:00"), to: &store)

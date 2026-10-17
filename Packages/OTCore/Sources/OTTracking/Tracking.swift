@@ -105,8 +105,8 @@ public enum GeofenceInterpreter {
         guard sinceExit >= 0 && sinceExit < flapSeconds else { return nil }
         // A session that began at or after that exit (at any location, e.g. 20 s inside an adjacent
         // plant's region) proves the device really left: the exit was no flap. Reviving the session
-        // would also make it overlap the later one, which the ledger resolves by cutting the revived
-        // session off at the later one's start (SPEC 4.7).
+        // would also make it overlap the later one, which the ledger merges into one block and flags
+        // `.overlappingLocations` (SPEC 4.7); the recorded facts stay as they happened.
         let candidate = store.presence[j]
         let recordedSince = store.presence.contains { $0.id != candidate.id && $0.enteredAt >= exitedAt }
         return recordedSince ? nil : j

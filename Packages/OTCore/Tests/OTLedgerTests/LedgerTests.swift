@@ -518,8 +518,10 @@ final class WindowDayTests: XCTestCase {
         XCTAssertTrue(r.flags.contains(.openPresence))
         XCTAssertEqual(r.presenceSeconds, 5 * 3600)
         XCTAssertEqual(r.lastOut, now)
-        XCTAssertEqual(r.earlyExitSeconds, 12600)
-        XCTAssertEqual(r.deltaSeconds, -12600)
+        // In-progress day (SPEC 4.3): the deficit is measured against [S, now], and the person is still there.
+        XCTAssertEqual(r.earlyExitSeconds, 0)
+        XCTAssertEqual(r.gapsDeductedSeconds, 0)
+        XCTAssertEqual(r.deltaSeconds, 0)
         XCTAssertFalse(r.flags.contains(.noShow))
     }
 
@@ -567,22 +569,26 @@ final class WindowDayTests: XCTestCase {
         XCTAssertFalse(r.flags.contains(.gapUndecided))
     }
 
-    func testOverlappingLocationsLaterEntryWins() {
+    func testOverlappingLocationsMergeAsPresence() {
+        // SPEC 4.7: time at any work location is presence; overlapping sites merge, nothing is cut.
         let r = result {
             $0.presence = [presence(self.d, "07:00", "11:00", at: Fixture.plantA), presence(self.d, "10:30", "15:30", at: Fixture.plantB)]
         }
         XCTAssertTrue(r.flags.contains(.overlappingLocations))
         XCTAssertEqual(r.presenceSeconds, Fixture.window)
         XCTAssertEqual(r.deltaSeconds, 0)
-        // The earlier session is considered exited when the later one started, so a later gap
-        // after the second session belongs to the second session.
-        let withGap = result {
+        // A visit to Plant B nested in a full day at Plant A changes nothing but the flag: the outer
+        // session covers the day, so there is no gap and the nested session's decision is never read.
+        let nested = result {
             $0.presence = [presence(self.d, "07:00", "15:30", at: Fixture.plantA), presence(self.d, "10:00", "11:00", at: Fixture.plantB, gapIsWork: true),
                            presence(self.d, "12:00", "15:30", at: Fixture.plantA)]
         }
-        XCTAssertTrue(withGap.flags.contains(.overlappingLocations))
-        XCTAssertEqual(withGap.gapsWorkSeconds, 3600)
-        XCTAssertEqual(withGap.deltaSeconds, 0)
+        XCTAssertTrue(nested.flags.contains(.overlappingLocations))
+        XCTAssertFalse(nested.flags.contains(.gapUndecided))
+        XCTAssertEqual(nested.presenceSeconds, Fixture.window)
+        XCTAssertEqual(nested.gapsWorkSeconds, 0)
+        XCTAssertEqual(nested.gapsDeductedSeconds, 0)
+        XCTAssertEqual(nested.deltaSeconds, 0)
     }
 
     func testFutureDayComputesOnlyScheduleAndFlag() {
@@ -890,10 +896,15 @@ final class SummaryTests: XCTestCase {
         var s = Fixture.store()
         s.settings.bankStartingSeconds = 7200
         let sum = Ledger.summary(store: s, now: t("2026-10-16", "06:00"))
-        // Today is a workday still in progress with nothing recorded: the whole window shows as deficit.
-        XCTAssertEqual(sum.todayDeltaSeconds, -Fixture.window)
-        XCTAssertEqual(sum.balanceSeconds, 7200 - Fixture.window)
+        // Today is a workday still in progress with nothing recorded, but the window has not started:
+        // nothing has elapsed, so nothing is deducted yet (SPEC 4.3, in-progress day).
+        XCTAssertEqual(sum.todayDeltaSeconds, 0)
+        XCTAssertEqual(sum.balanceSeconds, 7200)
         XCTAssertEqual(Ledger.earliestDay(store: s, now: t("2026-10-16", "06:00")), day("2026-10-16"))
+        // By the end of the window the whole day is a deficit.
+        let evening = Ledger.summary(store: s, now: t("2026-10-16", "20:00"))
+        XCTAssertEqual(evening.todayDeltaSeconds, -Fixture.window)
+        XCTAssertEqual(evening.balanceSeconds, 7200 - Fixture.window)
     }
 
     func testTrackingStartInTheFutureStillReportsToday() {

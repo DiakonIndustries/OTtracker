@@ -536,10 +536,14 @@ final class NoShowConditionTests: XCTestCase {
         let before = ledger(day: friday, now: end.addingTimeInterval(-1))
         XCTAssertFalse(before.flags.contains(.noShow))
         XCTAssertTrue(before.flags.contains(.inProgress))
-        XCTAssertEqual(before.deltaSeconds, -W) // the deficit is already applied, only the flag waits
+        // The deficit grows with the clock on an in-progress day (SPEC 4.3): one second before E it is
+        // one second short of the window; only the flag waits for E itself (SPEC 4.5).
+        XCTAssertEqual(before.deltaSeconds, -(W - 1))
+        XCTAssertEqual(before.gapsDeductedSeconds, W - 1)
         let atEnd = ledger(day: friday, now: end)
         XCTAssertTrue(atEnd.flags.contains(.noShow))
         XCTAssertTrue(atEnd.flags.contains(.inProgress))
+        XCTAssertEqual(atEnd.deltaSeconds, -W)
     }
 
     func testNoWindowDaysNeverFlag() {
@@ -632,14 +636,14 @@ final class DeterminismTests: XCTestCase {
             XCTAssertTrue(r.flags.contains(.overlappingLocations))
             XCTAssertFalse(r.flags.contains(.gapUndecided))
         }
-        // One second later elsewhere is "later": the first session is considered exited at that instant.
+        // One second later elsewhere merges just the same (SPEC 4.7): nothing is cut, the day is flagged.
         let later = presence(from: at(d, "07:00", 1), to: t(d, "08:00"), at: Fixture.plantB)
         for order in [[a, later], [later, a]] {
             let r = ledger { $0.presence = order }
-            XCTAssertEqual(r.presenceSeconds, 3600)
-            XCTAssertEqual(r.earlyExitSeconds, W - 3600)
-            XCTAssertEqual(r.deltaSeconds, -(W - 3600))
-            XCTAssertTrue(r.flags.contains(.overlappingLocations))
+            XCTAssertEqual(r.presenceSeconds, W)
+            XCTAssertEqual(r.earlyExitSeconds, 0)
+            XCTAssertEqual(r.deltaSeconds, 0)
+            XCTAssertEqual(r.flags, [.overlappingLocations])
         }
     }
 
@@ -703,6 +707,392 @@ final class DeterminismTests: XCTestCase {
         let sum = Ledger.summary(store: s, now: defaultNow)
         XCTAssertEqual(sum, LedgerSummary(balanceSeconds: -1200))
         XCTAssertEqual(Ledger.leaveBalances(store: s, asOf: day(d)).map { $0.remainingSeconds }, [0, 0])
+    }
+}
+
+// MARK: - 4.7 Overlapping sessions at different locations
+
+final class OverlappingLocationTests: XCTestCase {
+    func testNestedSessionAtASecondSiteIsPlainPresence() {
+        // A 07:00–15:30 with B 08:00–09:00 inside it: presence is the whole window, no gap, flag set.
+        var s = Fixture.store()
+        s.presence = [presence(d, "07:00", "15:30", at: Fixture.plantA), presence(d, "08:00", "09:00", at: Fixture.plantB)]
+        let r = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(r.presenceSeconds, W)
+        XCTAssertEqual(r.presenceInsideSeconds, W)
+        XCTAssertEqual(r.deltaSeconds, 0)
+        XCTAssertEqual(r.gapsDeductedSeconds, 0)
+        XCTAssertEqual(r.gapsWorkSeconds, 0)
+        XCTAssertEqual(r.flags, [.overlappingLocations])
+        XCTAssertEqual(Ledger.gaps(store: s, day: day(d), now: defaultNow), [])
+    }
+
+    func testOverlappingTailAtASecondSiteIsPlainPresence() {
+        // A 07:00–12:00 then B 11:30–15:30: one block from 07:00 to 15:30.
+        var s = Fixture.store()
+        s.presence = [presence(d, "07:00", "12:00", at: Fixture.plantA), presence(d, "11:30", "15:30", at: Fixture.plantB)]
+        for order in [s.presence, Array(s.presence.reversed())] {
+            s.presence = order
+            let r = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
+            XCTAssertEqual(r.firstIn, t(d, "07:00"))
+            XCTAssertEqual(r.lastOut, t(d, "15:30"))
+            XCTAssertEqual(r.presenceSeconds, W)
+            XCTAssertEqual(r.deltaSeconds, 0)
+            XCTAssertEqual(r.flags, [.overlappingLocations])
+        }
+    }
+
+    func testGapDefaultReadsTheLocationOfTheSessionThatEndsTheBlock() {
+        // Block 1 starts at A and ends at B (B exits last); the next block starts at A: a different
+        // location, so the undecided gap defaults to work, and B carries the decision.
+        let a = presence(d, "07:00", "10:00", at: Fixture.plantA)
+        let b = presence(d, "09:00", "11:00", at: Fixture.plantB)
+        let back = presence(d, "12:00", "15:30", at: Fixture.plantA)
+        var s = Fixture.store()
+        s.presence = [back, b, a]
+        let work = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(work.presenceSeconds, W - 3600)
+        XCTAssertEqual(work.gapsWorkSeconds, 3600)
+        XCTAssertEqual(work.gapsDeductedSeconds, 0)
+        XCTAssertEqual(work.deltaSeconds, 0)
+        XCTAssertEqual(Set(work.flags), [.overlappingLocations, .gapUndecided])
+        let gaps = Ledger.gaps(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(gaps.count, 1)
+        XCTAssertEqual(gaps[0].sessionID, b.id)
+        XCTAssertEqual(gaps[0].fromLocationID, Fixture.plantB)
+        XCTAssertEqual(gaps[0].toLocationID, Fixture.plantA)
+        XCTAssertEqual(gaps[0].interval, Interval(start: t(d, "11:00"), end: t(d, "12:00")))
+        XCTAssertEqual(gaps[0].countsAsWork, true)
+        // The ending session's stored decision wins over the default.
+        s.presence[1].followingGapIsWork = false
+        let decided = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(decided.gapsDeductedSeconds, 3600)
+        XCTAssertEqual(decided.deltaSeconds, -3600)
+        XCTAssertFalse(decided.flags.contains(.gapUndecided))
+        // A's own decision is about a gap that does not exist (A is absorbed) and is never read.
+        s.presence[1].followingGapIsWork = nil
+        s.presence[2].followingGapIsWork = false
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).gapsWorkSeconds, 3600)
+    }
+
+    func testGapDefaultIsPersonalWhenTheBlockEndsWhereTheNextStarts() {
+        // A 07:00–11:00 with B 08:00–09:00 nested: the block ends at A; the next block starts at A: personal.
+        let a = presence(d, "07:00", "11:00", at: Fixture.plantA)
+        let b = presence(d, "08:00", "09:00", at: Fixture.plantB)
+        var s = Fixture.store()
+        s.presence = [b, a, presence(d, "12:00", "15:30", at: Fixture.plantA)]
+        let r = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(r.gapsDeductedSeconds, 3600)
+        XCTAssertEqual(r.gapsWorkSeconds, 0)
+        XCTAssertEqual(r.deltaSeconds, -3600)
+        XCTAssertEqual(Set(r.flags), [.overlappingLocations, .gapUndecided])
+        let gaps = Ledger.gaps(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(gaps.map { $0.sessionID }, [a.id])
+        XCTAssertEqual(gaps[0].fromLocationID, Fixture.plantA)
+        XCTAssertEqual(gaps[0].toLocationID, Fixture.plantA)
+        XCTAssertEqual(gaps[0].countsAsWork, false)
+        // The next block's start location is the session that started it, even when another site joins later.
+        s.presence.append(presence(d, "12:30", "15:30", at: Fixture.plantB))
+        let joined = Ledger.gaps(store: s, day: day(d), now: defaultNow)
+        XCTAssertEqual(joined.count, 1)
+        XCTAssertEqual(joined[0].toLocationID, Fixture.plantA)
+        XCTAssertEqual(joined[0].countsAsWork, false)
+    }
+
+    func testEndTiesResolveByEnteredAtThenByUUIDAndStayOrderIndependent() {
+        // Both sessions exit at 11:00; B entered later, so B ends the block: the gap runs B→A and defaults to work.
+        var a = presence(d, "07:00", "11:00", at: Fixture.plantA)
+        var b = presence(d, "08:00", "11:00", at: Fixture.plantB)
+        let back = presence(d, "12:00", "15:30", at: Fixture.plantA)
+        a.id = UUID(uuidString: "ffffffff-ffff-4fff-8fff-ffffffffffff")! // the larger UUID does not matter when enteredAt differs
+        b.id = UUID(uuidString: "00000000-0000-4000-8000-000000000000")!
+        for order in [[a, b, back], [b, a, back], [back, a, b]] {
+            var s = Fixture.store()
+            s.presence = order
+            let gaps = Ledger.gaps(store: s, day: day(d), now: defaultNow)
+            XCTAssertEqual(gaps.map { $0.sessionID }, [b.id])
+            XCTAssertEqual(gaps[0].fromLocationID, Fixture.plantB)
+            XCTAssertEqual(gaps[0].countsAsWork, true)
+            XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).gapsWorkSeconds, 3600)
+        }
+        // Same enteredAt and same exit: the lexically larger UUID string ends the block.
+        b.enteredAt = a.enteredAt
+        for order in [[a, b, back], [b, a, back]] {
+            var s = Fixture.store()
+            s.presence = order
+            let gaps = Ledger.gaps(store: s, day: day(d), now: defaultNow)
+            XCTAssertEqual(gaps.map { $0.sessionID }, [a.id])
+            XCTAssertEqual(gaps[0].fromLocationID, Fixture.plantA)
+            XCTAssertEqual(gaps[0].countsAsWork, false)
+            XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).gapsDeductedSeconds, 3600)
+        }
+    }
+
+    func testOverlapFlagNeedsTwoLocationsAndStrictOverlap() {
+        var s = Fixture.store()
+        // Touching at 12:00 is not an overlap.
+        s.presence = [presence(d, "07:00", "12:00", at: Fixture.plantA), presence(d, "12:00", "15:30", at: Fixture.plantB)]
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).flags, [])
+        // Same site overlapping is not the flag either.
+        s.presence = [presence(d, "07:00", "12:00"), presence(d, "11:00", "15:30")]
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).flags, [])
+        // A third site overlapping only the first flags the day even though the latest end is elsewhere.
+        let siteC = UUID(uuidString: "cccccccc-cccc-4ccc-8ccc-cccccccccccc")!
+        s.presence = [presence(d, "07:00", "15:30", at: Fixture.plantA), presence(d, "07:00", "08:00", at: Fixture.plantA),
+                      presence(d, "07:30", "07:45", at: siteC)]
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).flags, [.overlappingLocations])
+        // Pieces at the latest-ending site never overlap another site: no flag.
+        s.presence = [presence(d, "07:00", "10:00", at: Fixture.plantA), presence(d, "10:00", "15:30", at: Fixture.plantB),
+                      presence(d, "11:00", "12:00", at: Fixture.plantB)]
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).flags, [])
+        // A regular manual segment has no location and never triggers the flag.
+        s.presence = [presence(d, "07:00", "15:30")]
+        s.manual = [manualBlock(d, "09:00", "10:00", countsAs: .regular)]
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).flags, [])
+    }
+}
+
+// MARK: - 4.3 In-progress day
+
+final class InProgressDayTests: XCTestCase {
+    /// Friday 2026-10-16, the fixture's `today` for a `now` on that day.
+    let friday = "2026-10-16"
+
+    func at(_ hhmm: String, _ seconds: Int = 0) -> Date { t(friday, hhmm).addingTimeInterval(TimeInterval(seconds)) }
+
+    func today(now: Date, _ configure: (inout Store) -> Void = { _ in }) -> DayResult {
+        ledger(configure, day: friday, now: now)
+    }
+
+    func testNothingRecordedBeforeTheWindowStartsIsNoDeficitYet() {
+        let r = today(now: at("06:00"))
+        XCTAssertEqual(r.deltaSeconds, 0)
+        XCTAssertEqual(r.gapsDeductedSeconds, 0)
+        XCTAssertEqual(r.lateArrivalSeconds, 0)
+        XCTAssertEqual(r.earlyExitSeconds, 0)
+        XCTAssertEqual(r.flags, [.inProgress])
+        XCTAssertEqual(Ledger.gaps(store: Fixture.store(), day: day(friday), now: at("06:00")), [])
+        // At S itself nothing has elapsed; one second later one second is missing.
+        XCTAssertEqual(today(now: at("07:00")).deltaSeconds, 0)
+        let second = today(now: at("07:00", 1))
+        XCTAssertEqual(second.deltaSeconds, -1)
+        XCTAssertEqual(second.gapsDeductedSeconds, 1)
+        XCTAssertFalse(second.flags.contains(.noShow))
+    }
+
+    func testPresentSinceTheStartIsZeroMidMorning() {
+        let r = today(now: at("10:00")) { $0.presence = [presence(self.friday, "07:00", nil)] }
+        XCTAssertEqual(r.deltaSeconds, 0)
+        XCTAssertEqual(r.earlyExitSeconds, 0)
+        XCTAssertEqual(r.gapsDeductedSeconds, 0)
+        XCTAssertEqual(r.presenceInsideSeconds, 3 * 3600)
+        XCTAssertEqual(Set(r.flags), [.inProgress, .openPresence])
+    }
+
+    func testLateArrivalIsDeductedAsSoonAsItHappened() {
+        let r = today(now: at("10:00")) { $0.presence = [presence(self.friday, "07:10", nil)] }
+        XCTAssertEqual(r.deltaSeconds, -600)
+        XCTAssertEqual(r.lateArrivalSeconds, 600)
+        XCTAssertEqual(r.earlyExitSeconds, 0)
+        XCTAssertEqual(r.gapsDeductedSeconds, 600)
+        // Within grace it is forgiven, as on any day.
+        let graced = today(now: at("10:00")) { $0.presence = [presence(self.friday, "07:04", nil)] }
+        XCTAssertEqual(graced.deltaSeconds, 0)
+        XCTAssertTrue(graced.flags.contains(.graceApplied))
+        // Not there yet at 07:03: three minutes missing so far.
+        XCTAssertEqual(today(now: at("07:03")).deltaSeconds, -180)
+    }
+
+    func testEarlyExitIsProvisionalAndGrowsUntilTheWindowEnds() {
+        func left(at exit: String, now: String, _ seconds: Int = 0) -> DayResult {
+            today(now: at(now, seconds)) { $0.presence = [presence(self.friday, "07:00", exit)] }
+        }
+        let halfHour = left(at: "14:00", now: "14:30")
+        XCTAssertEqual(halfHour.deltaSeconds, -1800)
+        XCTAssertEqual(halfHour.earlyExitSeconds, 1800)
+        XCTAssertEqual(halfHour.gapsDeductedSeconds, 1800)
+        XCTAssertEqual(left(at: "14:00", now: "15:00").earlyExitSeconds, 3600)
+        let atEnd = left(at: "14:00", now: "15:30")
+        XCTAssertEqual(atEnd.deltaSeconds, -5400)
+        XCTAssertEqual(atEnd.earlyExitSeconds, 5400)
+        let afterEnd = left(at: "14:00", now: "15:30", 1)
+        XCTAssertEqual(afterEnd.deltaSeconds, -5400)
+        XCTAssertEqual(afterEnd.earlyExitSeconds, 5400)
+        XCTAssertFalse(afterEnd.flags.contains(.noShow))
+        // Grace is judged against the scheduled end, not against now: leaving at 15:26 is forgiven at 15:28 and later.
+        let graced = left(at: "15:26", now: "15:28")
+        XCTAssertEqual(graced.deltaSeconds, 0)
+        XCTAssertEqual(graced.earlyExitSeconds, 0)
+        XCTAssertTrue(graced.flags.contains(.graceApplied))
+        XCTAssertEqual(left(at: "15:26", now: "16:00").deltaSeconds, 0)
+        // Leaving at 15:24 is one minute of deficit at 15:25 and six at the end.
+        XCTAssertEqual(left(at: "15:24", now: "15:25").deltaSeconds, -60)
+        XCTAssertEqual(left(at: "15:24", now: "15:30").deltaSeconds, -360)
+    }
+
+    func testMidDayGapIsClippedToNow() {
+        // Left at 12:00; at 12:30 that is a provisional early exit of 30 minutes.
+        let out = today(now: at("12:30")) { $0.presence = [presence(self.friday, "07:00", "12:00")] }
+        XCTAssertEqual(out.earlyExitSeconds, 1800)
+        XCTAssertEqual(out.deltaSeconds, -1800)
+        // With a hand-entered afternoon session it becomes a mid-day gap, deducted only up to now.
+        var s = Fixture.store()
+        let morning = presence(friday, "07:00", "12:00")
+        s.presence = [morning, presence(friday, "14:00", "15:30")]
+        let r = Ledger.dayResult(store: s, day: day(friday), now: at("12:30"))
+        XCTAssertEqual(r.earlyExitSeconds, 0)
+        XCTAssertEqual(r.gapsDeductedSeconds, 1800)
+        XCTAssertEqual(r.deltaSeconds, -1800)
+        XCTAssertTrue(r.flags.contains(.gapUndecided))
+        let gaps = Ledger.gaps(store: s, day: day(friday), now: at("12:30"))
+        XCTAssertEqual(gaps.map { $0.sessionID }, [morning.id])
+        XCTAssertEqual(gaps[0].secondsInsideWindow, 1800)
+        XCTAssertEqual(gaps[0].interval, Interval(start: t(friday, "12:00"), end: t(friday, "14:00")))
+        XCTAssertEqual(Ledger.gaps(store: s, day: day(friday), now: at("16:00"))[0].secondsInsideWindow, 7200)
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(friday), now: at("16:00")).deltaSeconds, -7200)
+        // Before the gap has begun, nothing is deducted for it.
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(friday), now: at("11:00")).deltaSeconds, 0)
+        XCTAssertEqual(Ledger.gaps(store: s, day: day(friday), now: at("11:00")), [])
+    }
+
+    func testFullDayPTOReliefNeverExceedsTheElapsedWindow() {
+        func pto(now: Date) -> DayResult { today(now: now) { $0.timeOff = [timeOff(self.friday, TimeOffType.ptoID, seconds: W)] } }
+        let dawn = pto(now: at("06:00"))
+        XCTAssertEqual(dawn.deltaSeconds, 0)
+        XCTAssertEqual(dawn.timeOffSeconds, 0)
+        XCTAssertEqual(dawn.gapsDeductedSeconds, 0)
+        let midday = pto(now: at("11:00"))
+        XCTAssertEqual(midday.deltaSeconds, 0)
+        XCTAssertEqual(midday.timeOffSeconds, 4 * 3600)
+        XCTAssertEqual(midday.gapsDeductedSeconds, 4 * 3600)
+        for now in [at("15:30"), at("15:30", 1), at("20:00")] {
+            let r = pto(now: now)
+            XCTAssertEqual(r.deltaSeconds, 0, "\(now)")
+            XCTAssertEqual(r.timeOffSeconds, W, "\(now)")
+            XCTAssertFalse(r.flags.contains(.noShow), "\(now)")
+        }
+        // Full-day PTO but came in for two hours: the worked time counts all day long.
+        let worked = today(now: at("11:00")) {
+            $0.timeOff = [timeOff(self.friday, TimeOffType.ptoID, seconds: W)]
+            $0.presence = [presence(self.friday, "07:00", "09:00")]
+        }
+        XCTAssertEqual(worked.deltaSeconds, 7200)
+        XCTAssertEqual(worked.timeOffSeconds, 4 * 3600)
+        XCTAssertEqual(worked.earlyExitSeconds, 7200)
+        XCTAssertEqual(today(now: at("20:00")) {
+            $0.timeOff = [timeOff(self.friday, TimeOffType.ptoID, seconds: W)]
+            $0.presence = [presence(self.friday, "07:00", "09:00")]
+        }.deltaSeconds, 7200)
+    }
+
+    func testFlexDayIsSpentImmediatelyAndInFull() {
+        for now in [at("06:00"), at("11:00"), at("15:30"), at("20:00")] {
+            let r = today(now: now) { $0.timeOff = [timeOff(self.friday, TimeOffType.flexID, seconds: W)] }
+            XCTAssertEqual(r.deltaSeconds, -W, "\(now)")
+            XCTAssertEqual(r.flexSpentSeconds, W, "\(now)")
+            XCTAssertEqual(r.timeOffSeconds, r.gapsDeductedSeconds, "relief equals what has elapsed (\(now))")
+            XCTAssertFalse(r.flags.contains(.noShow), "\(now)")
+        }
+        XCTAssertEqual(today(now: at("06:00")) { $0.timeOff = [timeOff(self.friday, TimeOffType.flexID, seconds: W)] }.timeOffSeconds, 0)
+    }
+
+    func testOtherTermsAreUnchangedWhileTheDayIsInProgress() {
+        let r = today(now: at("10:00")) {
+            $0.presence = [presence(self.friday, "06:30", nil)]
+            $0.manual = [manualBlock(self.friday, "05:00", "06:00")]
+            $0.adjustments = [Adjustment(day: day(self.friday), seconds: -300)]
+            $0.setOverride(DayOverride(day: day(self.friday), countEarlyArrival: true))
+        }
+        XCTAssertEqual(r.extraBeforeSeconds, 1800)
+        XCTAssertTrue(r.extraBeforeCounted)
+        XCTAssertEqual(r.manualExtraSeconds, 3600)
+        XCTAssertEqual(r.adjustmentSeconds, -300)
+        XCTAssertEqual(r.gapsDeductedSeconds, 0)
+        XCTAssertEqual(r.deltaSeconds, 1800 + 3600 - 300)
+        XCTAssertEqual(r.grossExtraSeconds, 1800 + 3600)
+        // A hand-entered session that already runs past E credits its tail now, as before.
+        let future = today(now: at("10:00")) { $0.presence = [presence(self.friday, "07:00", "17:00")] }
+        XCTAssertEqual(future.extraAfterSeconds, 5400)
+        XCTAssertEqual(future.deltaSeconds, 5400)
+        XCTAssertEqual(future.gapsDeductedSeconds, 0)
+    }
+
+    func testDeltaIdentityHoldsAtEveryInstantOfTheDay() {
+        var s = Fixture.store()
+        s.presence = [presence(friday, "07:08", "11:00"), presence(friday, "11:40", "13:00", at: Fixture.plantB), presence(friday, "14:00", nil)]
+        s.manual = [manualBlock(friday, "05:30", "06:00"), manualBlock(friday, "13:10", "13:20", countsAs: .regular)]
+        s.timeOff = [timeOff(friday, TimeOffType.ptoID, seconds: 3600), timeOff(friday, TimeOffType.flexID, seconds: 1800)]
+        s.adjustments = [Adjustment(day: day(friday), seconds: 240)]
+        var previousDelta: Int? = nil
+        for minute in stride(from: 5 * 60, through: 18 * 60, by: 7) {
+            let now = t(friday, "00:00").addingTimeInterval(TimeInterval(minute * 60 + 13))
+            let r = Ledger.dayResult(store: s, day: day(friday), now: now)
+            let earlyCounted = r.extraBeforeCounted ? r.extraBeforeSeconds : 0
+            XCTAssertEqual(r.deltaSeconds, r.extraAfterSeconds + earlyCounted - r.gapsDeductedSeconds + r.timeOffSeconds
+                           - r.flexSpentSeconds + r.manualExtraSeconds + r.adjustmentSeconds, "\(now)")
+            XCTAssertLessThanOrEqual(r.timeOffSeconds, max(0, min(W, minute * 60 + 13 - 7 * 3600)), "\(now)")
+            XCTAssertEqual(r.gapsDeducted(coveredBy: s, now: now), r.gapsDeductedSeconds, "\(now)")
+            XCTAssertTrue(r.flags.contains(.inProgress), "\(now)")
+            XCTAssertEqual(Ledger.gaps(store: s, day: day(friday), now: now).filter { !$0.countsAsWork }.reduce(0) { $0 + $1.secondsInsideWindow },
+                           r.gapsDeductedSeconds - r.lateArrivalSeconds - r.earlyExitSeconds, "\(now)")
+            // Back for good at 14:00: from then on every deficit term is final and the delta never falls.
+            if now >= t(friday, "14:00") {
+                if let p = previousDelta { XCTAssertGreaterThanOrEqual(r.deltaSeconds, p, "\(now)") }
+                previousDelta = r.deltaSeconds
+            }
+        }
+    }
+
+    func testCompletedDaysDoNotDependOnNow() {
+        var s = Fixture.store()
+        s.presence = [presence(d, "07:10", "12:00"), presence(d, "13:00", "15:20")]
+        s.timeOff = [timeOff(d, TimeOffType.ptoID, seconds: 3600)]
+        let reference = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
+        for now in [t(d, "15:30"), t(d, "23:59"), t("2026-10-15", "06:00"), Date.distantFuture] {
+            // Seen from the day itself (E already passed) only the `.inProgress` flag differs; every component agrees.
+            var r = Ledger.dayResult(store: s, day: day(d), now: now)
+            XCTAssertEqual(r.flags.contains(.inProgress), DayKey(now, calendar: Fixture.calendar) == day(d), "\(now)")
+            r.flags.removeAll { $0 == .inProgress }
+            XCTAssertEqual(r, reference, "\(now)")
+        }
+        XCTAssertEqual(reference.deltaSeconds, -600 - 3600 - 600 + 3600)
+    }
+
+    func testSummaryTodayDeltaFollowsTheClock() {
+        var s = Fixture.store()
+        s.presence = [presence(friday, "07:00", nil)]
+        XCTAssertEqual(Ledger.summary(store: s, now: at("12:00")).todayDeltaSeconds, 0)
+        XCTAssertEqual(Ledger.summary(store: s, now: at("12:00")).balanceSeconds, 0)
+        XCTAssertEqual(Ledger.summary(store: s, now: at("16:00")).todayDeltaSeconds, 1800)
+        s.presence = [presence(friday, "07:00", "12:00")]
+        XCTAssertEqual(Ledger.summary(store: s, now: at("12:00")).todayDeltaSeconds, 0)
+        XCTAssertEqual(Ledger.summary(store: s, now: at("13:00")).todayDeltaSeconds, -3600)
+        XCTAssertEqual(Ledger.summary(store: s, now: at("20:00")).todayDeltaSeconds, -12600)
+    }
+}
+
+private extension DayResult {
+    /// What SPEC 4.3 says the deficit must be on an in-progress day: `(Ecut − S) − inside(S, Ecut)` minus the
+    /// grace that forgave a boundary and the mid-day gaps that count as work.
+    func gapsDeducted(coveredBy store: Store, now: Date) -> Int {
+        guard let w = scheduledWindow else { return 0 }
+        let cutoff = min(w.end, now)
+        guard cutoff > w.start else { return 0 }
+        let elapsedWindow = Interval(start: w.start, end: cutoff)
+        var intervals = store.presence.map { $0.interval(now: now) }
+        for m in store.manual where m.countsAs == .regular {
+            for seg in m.segments { intervals.append(seg.interval(now: now)) }
+        }
+        let insideSoFar = Interval.seconds(of: intervals, inside: elapsedWindow)
+        let g = store.settings.graceSeconds
+        var forgiven = 0
+        if let firstIn, firstIn > w.start, Int(firstIn.timeIntervalSince(w.start).rounded()) <= g {
+            forgiven += Int(firstIn.timeIntervalSince(w.start).rounded())
+        }
+        if let lastOut, lastOut < w.end, Int(w.end.timeIntervalSince(lastOut).rounded()) <= g {
+            forgiven += max(0, Int(cutoff.timeIntervalSince(lastOut).rounded()))
+        }
+        return elapsedWindow.seconds - insideSoFar - forgiven - gapsWorkSeconds
     }
 }
 

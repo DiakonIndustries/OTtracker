@@ -123,8 +123,12 @@ final class OpenSessionTests: XCTestCase {
         XCTAssertEqual(r[1].extraAfterSeconds, W)
         XCTAssertEqual(r[1].deltaSeconds, W)
         XCTAssertEqual(r[3].lastOut, now)
-        XCTAssertEqual(r[3].earlyExitSeconds, W - 5 * H)
-        XCTAssertEqual(r[3].deltaSeconds, -(W - 5 * H))
+        // Today is in progress and the person is still there: nothing has been missed yet (SPEC 4.3).
+        XCTAssertEqual(r[3].extraBeforeSeconds, 7 * H)
+        XCTAssertEqual(r[3].presenceInsideSeconds, 5 * H)
+        XCTAssertEqual(r[3].earlyExitSeconds, 0)
+        XCTAssertEqual(r[3].gapsDeductedSeconds, 0)
+        XCTAssertEqual(r[3].deltaSeconds, 0)
         XCTAssertFalse(r[3].flags.contains(.noShow))
         // Seen from a later `now`, every closed day of the same open session is unchanged.
         XCTAssertEqual(range(s, "2026-10-12", "2026-10-14", now: t("2026-10-16", "20:00")), Array(r[0...2]))
@@ -142,7 +146,8 @@ final class OpenSessionTests: XCTestCase {
         XCTAssertEqual(r[1].lastOut, now)
         XCTAssertEqual(r[1].extraBeforeSeconds, 7 * H)
         XCTAssertEqual(r[1].presenceInsideSeconds, H)
-        XCTAssertEqual(r[1].earlyExitSeconds, W - H)
+        XCTAssertEqual(r[1].earlyExitSeconds, 0) // still there at 08:00: no deficit yet (SPEC 4.3, in-progress day)
+        XCTAssertEqual(r[1].deltaSeconds, 0)
         XCTAssertEqual(Set(r[1].flags), [.openPresence, .earlyArrivalUncounted, .inProgress])
     }
 
@@ -344,9 +349,9 @@ final class WindowEdgeTests: XCTestCase {
 final class OverlapAndInstantTests: XCTestCase {
     let d = "2026-10-14"
 
-    func testSessionNestedInsideAnotherAtADifferentSiteEndsTheOuterOne() {
-        // SPEC 4.7 taken literally: Plant B at 10:00 ends the Plant A session for computation, so after
-        // leaving B at 11:00 the ledger sees nobody at work (see spec question).
+    func testSessionNestedInsideAnotherAtADifferentSiteIsAbsorbedAndFlagged() {
+        // SPEC 4.7: time at any work location is presence. The Plant B visit lies inside the Plant A day,
+        // so the union is the whole day; only the flag records that two sites overlapped.
         let outer = presence(d, "07:00", "15:30", at: Fixture.plantA)
         let inner = presence(d, "10:00", "11:00", at: Fixture.plantB)
         for order in [[outer, inner], [inner, outer]] {
@@ -354,10 +359,12 @@ final class OverlapAndInstantTests: XCTestCase {
             s.presence = order
             let r = Ledger.dayResult(store: s, day: day(d), now: defaultNow)
             XCTAssertEqual(r.firstIn, t(d, "07:00"))
-            XCTAssertEqual(r.lastOut, t(d, "11:00"))
-            XCTAssertEqual(r.presenceSeconds, 4 * H)
-            XCTAssertEqual(r.earlyExitSeconds, W - 4 * H)
-            XCTAssertEqual(r.deltaSeconds, -(W - 4 * H))
+            XCTAssertEqual(r.lastOut, t(d, "15:30"))
+            XCTAssertEqual(r.presenceSeconds, W)
+            XCTAssertEqual(r.presenceInsideSeconds, W)
+            XCTAssertEqual(r.earlyExitSeconds, 0)
+            XCTAssertEqual(r.gapsDeductedSeconds, 0)
+            XCTAssertEqual(r.deltaSeconds, 0)
             XCTAssertEqual(r.flags, [.overlappingLocations])
             XCTAssertEqual(Ledger.gaps(store: s, day: day(d), now: defaultNow), [])
         }
@@ -697,10 +704,10 @@ final class FirstInLastOutTests: XCTestCase {
         XCTAssertEqual(gaps.map { $0.interval.start }, [t(d, "06:00"), t(d, "12:00"), t(d, "14:00")])
     }
 
-    func testLastOutFollowsTheOverlapCutAndAnOpenRegularTimer() {
+    func testLastOutSpansOverlappingSitesAndAnOpenRegularTimer() {
         var s = Fixture.store()
         s.presence = [presence(d, "07:00", "15:30", at: Fixture.plantA), presence(d, "10:00", "11:00", at: Fixture.plantB)]
-        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).lastOut, t(d, "11:00"))
+        XCTAssertEqual(Ledger.dayResult(store: s, day: day(d), now: defaultNow).lastOut, t(d, "15:30")) // union, nothing is cut (SPEC 4.7)
         let now = t("2026-10-16", "21:00")
         var timer = ManualSession(category: "Home work", countsAs: .regular, createdAt: Fixture.created)
         timer.segments = [ManualSegment(start: t("2026-10-16", "18:00"), end: t("2026-10-16", "18:30")), ManualSegment(start: t("2026-10-16", "19:00"), end: nil)]

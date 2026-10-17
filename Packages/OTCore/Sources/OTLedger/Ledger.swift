@@ -118,6 +118,11 @@ public enum Ledger {
     /// - `timeOffSeconds`: Σ time-off entries of every type, capped at the window length on window
     ///   days, uncapped (informational) on days without a window.
     /// - `flexSpentSeconds`: Σ entries whose type `deductsFromBank`, never capped.
+    /// - In-progress day (today, `.inProgress`, SPEC 4.3): a deficit can only come from time that has
+    ///   already elapsed. With `Ecut = min(E, now)` the deficit terms (`lateArrivalSeconds`,
+    ///   `earlyExitSeconds`, mid-day gaps, `gapsDeductedSeconds`) are computed against `[S, Ecut]` and
+    ///   `timeOffSeconds` is capped at `Ecut − S`; `flexSpentSeconds` is not. The early exit is
+    ///   provisional and grows until `E`. Completed days (`E <= now`) are unaffected.
     /// - On window days the identity
     ///   `deltaSeconds == extraAfterSeconds + (extraBeforeCounted ? extraBeforeSeconds : 0) − gapsDeductedSeconds
     ///    + timeOffSeconds − flexSpentSeconds + manualExtraSeconds + adjustmentSeconds`
@@ -280,7 +285,7 @@ public enum Ledger {
     /// One clipped piece of presence on a day: a presence session or a regular manual segment.
     private struct Piece {
         var interval: Interval
-        /// Original start, used to decide which of two overlapping locations is "later".
+        /// Original start: tiebreak for which session ends a merged block (SPEC 4.7).
         var enteredAt: Date
         /// Index into `store.presence`; nil for a regular manual segment.
         var presenceIndex: Int?
@@ -426,25 +431,31 @@ public enum Ledger {
         }
         if openPresence { flags.append(.openPresence) }
 
-        // Overlapping locations: the later `enteredAt` wins from its start (SPEC 4.7).
-        pieces.sort { ($0.enteredAt, $0.interval.start, $0.key) < ($1.enteredAt, $1.interval.start, $1.key) }
+        // Overlapping locations (SPEC 4.7): time at any work location is presence, so nothing is cut and
+        // the sessions merge below like same-site overlaps; the day is only flagged. One pass over the
+        // pieces sorted by start: a piece overlaps an earlier piece at another location when the latest
+        // end seen so far at a location other than its own lies after its start. `bestEnd` is the latest
+        // end so far (at `bestLocation`), `otherEnd` the latest end so far at any other location.
+        pieces.sort { ($0.interval.start, $0.enteredAt, $0.key) < ($1.interval.start, $1.enteredAt, $1.key) }
         var overlapping = false
-        if pieces.count > 1 {
-            for i in 0..<(pieces.count - 1) {
-                for j in (i + 1)..<pieces.count {
-                    // Later pieces start no earlier than this one, so the first that does not overlap ends the
-                    // search. Tested before the location so a day of same-site flapping stays linear.
-                    guard pieces[j].interval.start < pieces[i].interval.end else { break }
-                    guard pieces[j].locationID != pieces[i].locationID else { continue }
-                    overlapping = true
-                    // Two arrivals at the same instant have no "later" one: neither is cut, both merge.
-                    // Otherwise the result would depend on the order of `store.presence`.
-                    guard pieces[j].enteredAt > pieces[i].enteredAt else { continue }
-                    pieces[i].interval = Interval(start: pieces[i].interval.start, end: pieces[j].interval.start)
-                    break
-                }
+        var bestEnd = Date.distantPast
+        var bestLocation: UUID? = nil
+        var otherEnd = Date.distantPast
+        for p in pieces {
+            let competitor = p.locationID == bestLocation ? otherEnd : bestEnd
+            if competitor > p.interval.start {
+                overlapping = true
+                break
             }
-            pieces.removeAll { $0.interval.isEmpty }
+            if p.locationID == bestLocation {
+                bestEnd = max(bestEnd, p.interval.end)
+            } else if p.interval.end > bestEnd {
+                otherEnd = bestEnd
+                bestEnd = p.interval.end
+                bestLocation = p.locationID
+            } else {
+                otherEnd = max(otherEnd, p.interval.end)
+            }
         }
         if overlapping { flags.append(.overlappingLocations) }
 
@@ -466,7 +477,11 @@ public enum Ledger {
         let manualRegular = Interval.totalSeconds(regular)
         let manualExtra = Interval.totalSeconds(extra)
 
-        // Merge into blocks (union), remembering start location and the piece each block ends with.
+        // Merge into blocks (union), remembering the location a block started at and the piece it ends
+        // with (SPEC 4.7): the latest exit; on a tie the later `enteredAt`, then the lexically larger UUID
+        // (pieces arrive in that order, so `>=` picks the later one); a presence piece beats a regular
+        // manual segment ending at the same instant. The gap-default rule and `Ledger.gaps` read the
+        // from-location and the decision from that ending session.
         pieces.sort { ($0.interval.start, $0.enteredAt, $0.key) < ($1.interval.start, $1.enteredAt, $1.key) }
         var blocks: [Block] = []
         for p in pieces {
@@ -510,6 +525,11 @@ public enum Ledger {
             let S = window.start
             let E = window.end
             let g = store.settings.graceSeconds
+            // In-progress day: a deficit can only come from time that has already elapsed, so every
+            // deficit term is measured against `[S, Ecut]` with `Ecut = min(E, now)`. On a completed day
+            // `E <= now`, `Ecut == E` and `elapsed` is the whole window, so nothing changes there.
+            let cutoff = min(E, now)
+            let elapsed = max(0, seconds(from: S, to: cutoff))
             let inside = merged.compactMap { $0.clipped(to: window) }.reduce(0) { $0 + $1.seconds }
             var before = merged.compactMap { $0.clipped(to: Interval(start: dayStart, end: S)) }.reduce(0) { $0 + $1.seconds }
             var after = merged.compactMap { $0.clipped(to: Interval(start: E, end: dayEnd)) }.reduce(0) { $0 + $1.seconds }
@@ -526,12 +546,14 @@ public enum Ledger {
                 if lateOffset > 0 && lateOffset <= g {
                     grace = true
                 } else {
-                    late = max(0, min(windowSeconds, lateOffset))
+                    late = max(0, min(elapsed, lateOffset))
                 }
+                // Grace is judged against the scheduled end; the amount runs only to the cutoff, so on an
+                // in-progress day the early exit is provisional and grows until E.
                 if earlyOffset > 0 && earlyOffset <= g {
                     grace = true
                 } else {
-                    early = max(0, min(windowSeconds, earlyOffset))
+                    early = max(0, min(elapsed, seconds(from: lastOut, to: cutoff)))
                 }
                 let overrun = seconds(from: E, to: lastOut)          // > 0 when the last exit is after E
                 if overrun > 0 && overrun <= g {
@@ -548,7 +570,7 @@ public enum Ledger {
                     for k in 0..<(blocks.count - 1) {
                         let a = blocks[k]
                         let b = blocks[k + 1]
-                        let secs = seconds(from: max(a.end, S), to: min(b.start, E))
+                        let secs = seconds(from: max(a.end, S), to: min(b.start, cutoff))
                         guard secs > 0 else { continue }
                         let session = a.endPiece.presenceIndex.map { store.presence[$0] }
                         let decision = session?.followingGapIsWork
@@ -565,8 +587,10 @@ public enum Ledger {
                 }
             }
 
-            let gapsDeducted = blocks.isEmpty ? windowSeconds : late + early + personal
-            let timeOff = min(timeOffRaw, windowSeconds)
+            let gapsDeducted = blocks.isEmpty ? elapsed : late + early + personal
+            // Relief is capped at the elapsed window so it never exceeds what it is relieving; a flex
+            // spend is a bank withdrawal and stays uncapped and immediate.
+            let timeOff = min(timeOffRaw, elapsed)
             let counted = override?.countEarlyArrival ?? false
             let earlyCounted = counted ? before : 0
 
@@ -591,7 +615,7 @@ public enum Ledger {
             result.deltaSeconds = excused ? 0 : delta
             result.grossExtraSeconds = excused ? 0 : gross
 
-            // SPEC 4.5
+            // SPEC 4.5: the flag waits for E even though the deficit already grows with the clock.
             if E <= now && inside == 0 && manualRegular == 0 && timeOff < windowSeconds && !excused {
                 flags.append(.noShow)
             }

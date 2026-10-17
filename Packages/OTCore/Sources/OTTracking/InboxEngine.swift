@@ -63,8 +63,9 @@ public enum InboxEngine {
 
     /// Undecided mid-day gaps on every day result the ledger flagged `.gapUndecided`, re-derived
     /// with `Ledger.gaps` so the subject (the session whose `followingGapIsWork` the ledger reads),
-    /// the amount and the default are exactly what the ledger applied: merged overlapping sessions,
-    /// regular manual time joining presence and the "later location wins" rule included.
+    /// the amount and the default are exactly what the ledger applied: merged overlapping sessions
+    /// (at one site or several, the block ending with the latest exit), regular manual time joining
+    /// presence, and on an in-progress day the clipping to `now` included.
     /// A gap that follows a regular manual segment has no session to carry a decision and raises
     /// nothing. Results without the flag raise nothing.
     static func gapItems(_ ctx: Context) -> [InboxItem] {
@@ -120,7 +121,29 @@ public enum InboxEngine {
 
     // MARK: exit:<sessionID>
 
-    /// The last geofence exit of today or yesterday when it moved the delta (stayed late or left early).
+    /// Seconds the exit of `session` moved the delta of `dayResult`'s day, or nil when it moved nothing.
+    /// One source of truth for the Inbox item and for the app's exit notification, so both agree.
+    /// - Window day: `+extraAfterSeconds` when > 0, else `−earlyExitSeconds` when > 0, else nil. On an
+    ///   in-progress day the early exit is provisional (it grows until the window ends, SPEC 4.3) and is
+    ///   still reported.
+    /// - Day without a window (weekend, holiday, day off): the session's own presence on that day,
+    ///   clipped to the day, positive, because all of it counts (SPEC 4.4).
+    /// An open session has no exit and yields nil. Whether this exit is the day's final departure is the
+    /// caller's question (`exitItems` checks `presenceContinues`); the amount is the same either way.
+    public static func exitEffectSeconds(for session: PresenceSession, dayResult: DayResult, store: Store, now: Date) -> Int? {
+        guard session.exitedAt != nil else { return nil }
+        if dayResult.scheduledWindow != nil {
+            if dayResult.extraAfterSeconds > 0 { return dayResult.extraAfterSeconds }
+            if dayResult.earlyExitSeconds > 0 { return -dayResult.earlyExitSeconds }
+            return nil
+        }
+        let dayInterval = dayResult.day.interval(in: store.calendar)
+        guard let onDay = session.interval(now: now).clipped(to: dayInterval), onDay.seconds > 0 else { return nil }
+        return onDay.seconds
+    }
+
+    /// The last geofence exit of today or yesterday when it moved the delta: stayed late or left early on a
+    /// window day, or any presence at all on a day without a window, where all of it counts (SPEC 4.4).
     static func exitItems(_ ctx: Context) -> [InboxItem] {
         let recent = ctx.yesterday.start(in: ctx.calendar)
         var items: [InboxItem] = []
@@ -128,18 +151,12 @@ public enum InboxEngine {
             guard s.source == .geofence, let exitedAt = s.exitedAt, exitedAt >= recent else { continue }
             let day = ctx.day(of: exitedAt)
             guard ctx.isTodayOrYesterday(day), let result = ctx.byDay[day] else { continue }
-            guard result.extraAfterSeconds > 0 || result.earlyExitSeconds > 0 else { continue }
+            guard let effect = exitEffectSeconds(for: s, dayResult: result, store: ctx.store, now: ctx.now), effect != 0 else { continue }
             // Only the day's final departure moves the boundary; mid-day exits are gap items.
             guard !presenceContinues(after: exitedAt, on: day, excluding: s.id, ctx) else { continue }
-            let detail: String
-            let applied: String
-            if result.extraAfterSeconds > 0 {
-                detail = "+" + DurationFormat.hm(result.extraAfterSeconds)
-                applied = "Added \(DurationFormat.hm(result.extraAfterSeconds))"
-            } else {
-                detail = "\u{2212}" + DurationFormat.hm(result.earlyExitSeconds)
-                applied = "Deducted \(DurationFormat.hm(result.earlyExitSeconds))"
-            }
+            let amount = DurationFormat.hm(abs(effect))
+            let detail = effect > 0 ? "+" + amount : "\u{2212}" + amount
+            let applied = effect > 0 ? "Added \(amount)" : "Deducted \(amount)"
             items.append(InboxItem(
                 key: "exit:\(s.id.uuidString)",
                 kind: .exit,

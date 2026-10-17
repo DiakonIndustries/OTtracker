@@ -215,6 +215,24 @@ Why this formula matches the owner's wording:
 * Full day of PTO but came in 2h → `inside = 2h`, `gaps = 6h`, `T = 8h` → `+2h`. Worked on a day off: counts.
 * Took a flex day → `gaps = 8h`, `T = 8h`, `flexSpent = 8h` → `−8h`. Bank paid for the day.
 
+**In-progress day** (today in `store.calendar`, flag `.inProgress`): a deficit can only come from
+time that has already elapsed. With `Ecut = min(E, now)`:
+* `now <= S` → no gaps yet: `gaps = 0`, `lateArrival = 0`, `earlyExit = 0`.
+* Otherwise gaps are computed against `[S, Ecut]` instead of `[S, E]`:
+  `gaps = (Ecut − S) − inside(S, Ecut)`. Late arrival is `firstIn − S` after grace, as on any
+  day. The early-exit part is `Ecut − lastExit` once the person has left and `now` is still before
+  `E`: it is **provisional** and grows until `E` (grace for it is still judged against `E`, so a
+  last exit in `[E − g, E)` is forgiven at every `now`). Mid-day gaps are clipped to `Ecut` too.
+* `T` is capped at the **elapsed** window `Ecut − S` (not `E − S`), so time-off relief never
+  exceeds what it is relieving: a full-day PTO entry gives `0` at 06:00 (`gaps = 0`, `T = 0`),
+  `0` at 11:00 (`gaps = 4h`, `T = 4h`) and `0` after `E`, never `+8.5h` in the morning.
+* `flexSpent` is **not** capped and is immediate: it is a bank withdrawal, not relief, so a flex
+  day shows `−(E − S)` all day long.
+* `after`, `before` / `earlyCounted`, `manualExtra` and `adjustments` are unchanged; open
+  sessions and running regular timers already run to `now`.
+Completed days (`E <= now`, hence `Ecut == E`) are unaffected. The identity for `delta` above
+holds at every instant, with `gapsDeducted` being whatever was actually deducted so far.
+
 ### 4.4 Delta on a day **without** a window
 ```
 delta      = presence + manualExtra + adjustments − flexSpent
@@ -228,6 +246,11 @@ not excused → flag `.noShow`. The deficit is applied (the day's `delta` is neg
 Inbox offers ways to fix it (section 6). Nothing is pending; the balance always says
 what the data says.
 
+The flag still waits for `E`. On the in-progress day (4.3) the deficit of an empty day grows
+with the clock: one second before `E` it is `−(E − S − 1)` without the flag; at `E` it is
+`−(E − S)` with it. Full-day time off (`T == E − S` once the window has elapsed) prevents the flag
+as before, because `T` is capped at the elapsed window and reaches `E − S` exactly at `E`.
+
 ### 4.6 Summaries
 * `balance(asOf)`      = `settings.bankStartingSeconds` + Σ delta over `[bankStartingAsOf, asOf]`.
 * `monthGrossExtra`    = Σ grossExtra for days in the current calendar month.
@@ -239,8 +262,17 @@ what the data says.
 
 ### 4.7 Edge rules
 * Overlapping presence sessions at the same location are merged.
-* Overlapping sessions at different locations: the later `enteredAt` wins from its start
-  (the earlier one is considered exited at that instant for computation; the stored fact is untouched and flagged).
+* Overlapping sessions at different locations: time at any work location is presence, so they
+  merge (union) exactly like same-site overlaps — nothing is cut, the stored facts are untouched
+  — and the day is flagged `.overlappingLocations`. For the gap-default rule (4.3) a merged block
+  **starts** at the location of the session that started it and **ends** at the location of the
+  session that ends it: the latest exit; tie → the later `enteredAt`; tie again → the lexically
+  larger UUID string, so the result never depends on the order of `store.presence`. That ending
+  session also carries the `followingGapIsWork` decision for the gap after the block.
+  `Ledger.gaps` reports the same `fromLocationID` / `toLocationID`. Examples (07:00–15:30
+  window): A 07:00–15:30 with B 08:00–09:00 nested → presence 8h 30m, delta 0, flag, no gap;
+  A 07:00–12:00 then B 11:30–15:30 → presence 8h 30m, delta 0; A 07:00–10:00 overlapping
+  B 09:00–11:00, then A from 12:00 → the block ends at B, the 11:00–12:00 gap defaults to work.
 * Durations are integer seconds. Dates compare with second precision.
 * Day boundaries follow `settings.timeZoneIdentifier`, DST handled by `Calendar`.
 
@@ -279,7 +311,7 @@ the key to `store.dismissedInboxKeys`.
 |---|---|---|
 | `gap:<sessionID>` | gap inside a window with `followingGapIsWork == nil` | Work trip · Personal |
 | `noshow:<day>` | `.noShow` flag | Add PTO · Add Personal · Remote day (creates regular manual S–E) · Enter hours · Excuse · Keep deficit (dismiss) |
-| `exit:<sessionID>` | auto-detected exit that moved the delta (|effect| > 0), today or yesterday | Confirm (dismiss) · Adjust · Remove |
+| `exit:<sessionID>` | auto-detected exit that moved the delta (|effect| > 0), today or yesterday, and only the day's final departure (no presence or regular time after it). On a window day the effect is `+after` (stayed late) or else `−earlyExit` (left early; provisional while the day is in progress, 4.3). On a day **without** a window (weekend, holiday, day off) all presence counts (4.4), so the effect is the closed session's own presence on that day, clipped to the day: detail `+3h 10m`, default `Added 3h 10m`. `InboxEngine.exitEffectSeconds(for:dayResult:store:now:)` is the one source of this number, also for the exit notification. | Confirm (dismiss) · Adjust · Remove |
 | `early:<day>` | `before > g` and `countEarlyArrival == false` | Count it · Don't count (dismiss) |
 | `timer:<manualID>:<n>` | running manual session active ≥ n × nudgeMinutes | Still working (dismiss) · Stop now · Set stop time |
 | `stale:<sessionID>` | open presence older than `staleOpenSessionHours` | Set exit time · Delete |
