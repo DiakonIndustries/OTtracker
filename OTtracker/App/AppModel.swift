@@ -18,6 +18,7 @@ enum Route: Hashable {
     case exportMonth(String, email: Bool)
     case locations
     case importFile
+    case export
 }
 
 struct ImportPreview {
@@ -44,6 +45,10 @@ final class AppModel {
     @ObservationIgnored let widgets: WidgetBridging
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var backupTask: Task<Void, Never>?
+    /// True while `store` is an empty placeholder because store.json exists but could not be read at launch
+    /// (e.g. protected data before the first unlock). Nothing derived from it may be written anywhere until
+    /// the real file loads (`sceneBecameActive`) or the person deliberately replaces it (`replaceStore`).
+    @ObservationIgnored private var savesBlocked = false
 
     // MARK: State
 
@@ -51,6 +56,9 @@ final class AppModel {
     /// Day results for roughly the last 400 days through next week. Use `dayResult(for:)`.
     private(set) var results: [DayKey: DayResult] = [:]
     private(set) var summary = LedgerSummary()
+    /// Bank balance through yesterday: `summary.balanceSeconds` without today's provisional delta.
+    /// What the Home headline, the Time Off tab and the widget show as "the balance".
+    private(set) var settledBalanceSeconds = 0
     private(set) var leaveBalances: [LeaveBalance] = []
     private(set) var inbox: [InboxItem] = []
     private(set) var monthlyExports: [MonthlyExportFile] = []
@@ -74,11 +82,17 @@ final class AppModel {
         self.liveActivity = liveActivity
         self.backup = backup
         self.widgets = widgets
-        var loaded = (try? repository.load()) ?? nil
-        if loaded == nil { loaded = Store() }
+        var loaded: Store? = nil
+        var loadError: Error? = nil
+        do { loaded = try repository.load() } catch { loadError = error }
         self.store = loaded ?? Store()
         self.locationStatus = location.authorizationStatus
         self.lastBackupAt = UserDefaults.standard.object(forKey: "lastBackupAt") as? Date
+        if let e = loadError as? StoreLoadError, case .unreadable = e {
+            // The file is there but its bytes could not be read: never let the empty placeholder overwrite
+            // it, the iCloud snapshots, the widget snapshot or the monitored geofences.
+            savesBlocked = true
+        }
 
         location.onAuthorizationChange = { [weak self] status in
             guard let self else { return }
@@ -91,10 +105,16 @@ final class AppModel {
         monthlyExports = ExportService.existingMonthlyExports()
         recompute()
         syncRegions()
+        if let loadError {
+            alert = AppAlert(title: "Could not read saved data",
+                             message: savesBlocked
+                                 ? "Your data is still on this phone but could not be opened. Quit and reopen OTtracker. Nothing will be saved until it loads."
+                                 : "The saved file was damaged and has been kept next to the new one. Restore from an iCloud backup in Settings > Backup, or continue with a fresh start. (\(loadError.localizedDescription))")
+        }
         Task { [weak self] in
             guard let self else { return }
             self.iCloudAvailable = await self.backup.isAvailable()
-            self.notificationsAuthorized = self.notifications.isAuthorized
+            self.notificationsAuthorized = await self.notifications.authorizationStatus()
         }
     }
 
