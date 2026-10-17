@@ -180,7 +180,7 @@ public enum Ledger {
         let end = min(day, today)
         var total = store.settings.bankStartingSeconds
         guard start <= end else { return total }
-        for r in dayResults(store: store, from: start, through: end, now: now) { total += r.deltaSeconds }
+        for r in dayResults(store: store, from: start, through: end, now: now) { total = total.saturatingAdding(r.deltaSeconds) }
         return total
     }
 
@@ -204,13 +204,13 @@ public enum Ledger {
         var s = LedgerSummary(balanceSeconds: store.settings.bankStartingSeconds)
         var sawToday = false
         for r in results {
-            s.balanceSeconds += r.deltaSeconds
+            s.balanceSeconds = s.balanceSeconds.saturatingAdding(r.deltaSeconds)
             if r.day >= monthStart {
-                s.monthGrossExtraSeconds += r.grossExtraSeconds
-                s.monthDeltaSeconds += r.deltaSeconds
+                s.monthGrossExtraSeconds = s.monthGrossExtraSeconds.saturatingAdding(r.grossExtraSeconds)
+                s.monthDeltaSeconds = s.monthDeltaSeconds.saturatingAdding(r.deltaSeconds)
             }
-            if r.day >= weekFirst { s.weekDeltaSeconds += r.deltaSeconds }
-            if r.day >= yearStart { s.ytdDeltaSeconds += r.deltaSeconds }
+            if r.day >= weekFirst { s.weekDeltaSeconds = s.weekDeltaSeconds.saturatingAdding(r.deltaSeconds) }
+            if r.day >= yearStart { s.ytdDeltaSeconds = s.ytdDeltaSeconds.saturatingAdding(r.deltaSeconds) }
             if r.day == today {
                 s.todayDeltaSeconds = r.deltaSeconds
                 sawToday = true
@@ -238,7 +238,7 @@ public enum Ledger {
         return configs.map { c in
             let accrued = accruedSeconds(rule: c.accrual, from: c.asOf, through: day, calendar: cal)
             var used = 0
-            for e in store.timeOff where e.typeID == c.typeID && e.day >= c.asOf && e.day <= day { used += e.seconds }
+            for e in store.timeOff where e.typeID == c.typeID && e.day >= c.asOf && e.day <= day { used = used.saturatingAdding(e.seconds) }
             return LeaveBalance(typeID: c.typeID, startingSeconds: c.startingSeconds, accruedSeconds: accrued, usedSeconds: used)
         }
     }
@@ -401,7 +401,8 @@ public enum Ledger {
         let sched = resolveSchedule(store: store, day: day, weekday: weekday, override: override,
                                     holiday: index.holidayByDay[day], calendar: cal)
         let windowSeconds = sched.window?.seconds ?? 0
-        let breakSeconds = (sched.weekdaySchedule?.unpaidBreakMinutes ?? 0) * 60
+        // Clamped to a day: an absurd (imported) break must not trap the multiplication.
+        let breakSeconds = min(max(0, sched.weekdaySchedule?.unpaidBreakMinutes ?? 0), 24 * 60) * 60
         var result = DayResult(day: day, kind: sched.kind, scheduledWindow: sched.window,
                                expectedSeconds: sched.window == nil ? 0 : max(0, windowSeconds - breakSeconds))
 
@@ -430,9 +431,11 @@ public enum Ledger {
         var overlapping = false
         if pieces.count > 1 {
             for i in 0..<(pieces.count - 1) {
-                for j in (i + 1)..<pieces.count where pieces[j].locationID != pieces[i].locationID {
-                    // Later pieces start no earlier than this one, so the first that does not overlap ends the search.
+                for j in (i + 1)..<pieces.count {
+                    // Later pieces start no earlier than this one, so the first that does not overlap ends the
+                    // search. Tested before the location so a day of same-site flapping stays linear.
                     guard pieces[j].interval.start < pieces[i].interval.end else { break }
+                    guard pieces[j].locationID != pieces[i].locationID else { continue }
                     overlapping = true
                     // Two arrivals at the same instant have no "later" one: neither is cut, both merge.
                     // Otherwise the result would depend on the order of `store.presence`.
@@ -492,11 +495,11 @@ public enum Ledger {
         var timeOffRaw = 0
         var flexSpent = 0
         for e in entries {
-            timeOffRaw += e.seconds
-            if index.typeByID[e.typeID]?.deductsFromBank == true { flexSpent += e.seconds }
+            timeOffRaw = timeOffRaw.saturatingAdding(e.seconds)
+            if index.typeByID[e.typeID]?.deductsFromBank == true { flexSpent = flexSpent.saturatingAdding(e.seconds) }
         }
         var adjustments = 0
-        for a in index.adjustmentsByDay[day] ?? [] { adjustments += a.seconds }
+        for a in index.adjustmentsByDay[day] ?? [] { adjustments = adjustments.saturatingAdding(a.seconds) }
         result.flexSpentSeconds = flexSpent
         result.adjustmentSeconds = adjustments
         let excused = sched.kind == .excused
@@ -581,8 +584,10 @@ public enum Ledger {
             if before > 0 && !counted { flags.append(.earlyArrivalUncounted) }
             if undecided { flags.append(.gapUndecided) }
 
-            let delta = after + earlyCounted - gapsDeducted + timeOff - flexSpent + manualExtra + adjustments
-            let gross = after + earlyCounted + manualExtra + max(0, adjustments)
+            // Presence-derived terms are bounded by the day; time off and adjustments are user input.
+            let userTerms = timeOff.saturatingAdding(adjustments).saturatingSubtracting(flexSpent)
+            let delta = (after + earlyCounted - gapsDeducted + manualExtra).saturatingAdding(userTerms)
+            let gross = (after + earlyCounted + manualExtra).saturatingAdding(max(0, adjustments))
             result.deltaSeconds = excused ? 0 : delta
             result.grossExtraSeconds = excused ? 0 : gross
 
@@ -594,11 +599,27 @@ public enum Ledger {
             // SPEC 4.4
             result.timeOffSeconds = timeOffRaw
             let presence = result.presenceSeconds
-            result.deltaSeconds = excused ? 0 : presence + manualExtra + adjustments - flexSpent
-            result.grossExtraSeconds = excused ? 0 : presence + manualExtra + max(0, adjustments)
+            result.deltaSeconds = excused ? 0 : (presence + manualExtra).saturatingAdding(adjustments).saturatingSubtracting(flexSpent)
+            result.grossExtraSeconds = excused ? 0 : (presence + manualExtra).saturatingAdding(max(0, adjustments))
         }
 
         result.flags = flags
         return DayComputation(result: result, gaps: gaps)
+    }
+}
+
+// MARK: - Saturating arithmetic
+
+/// Sums that include user-entered seconds (time off, adjustments, the starting balance) saturate instead of
+/// trapping, so an absurd value in an imported or hand-edited backup can never crash the ledger.
+private extension Int {
+    func saturatingAdding(_ other: Int) -> Int {
+        let (sum, overflow) = addingReportingOverflow(other)
+        return overflow ? (other < 0 ? .min : .max) : sum
+    }
+
+    func saturatingSubtracting(_ other: Int) -> Int {
+        let (difference, overflow) = subtractingReportingOverflow(other)
+        return overflow ? (other < 0 ? .max : .min) : difference
     }
 }
