@@ -164,26 +164,34 @@ final class AppModel {
         var s = store
         body(&s)
         guard s != store else { return }
+        let before = store.activeManualSession
         store = s
         recompute()
         scheduleSave()
+        reconcileTimerNudge(before: before)
     }
 
     func mutateThrowing(_ body: (inout Store) throws -> Void) throws {
         var s = store
         try body(&s)
         guard s != store else { return }
+        let before = store.activeManualSession
         store = s
         recompute()
         scheduleSave()
+        reconcileTimerNudge(before: before)
     }
 
-    /// Replaces the whole store (restore / import replace).
+    /// Replaces the whole store (restore / import replace). A deliberate overwrite, so it also lifts the
+    /// save block set when the file could not be read at launch.
     func replaceStore(_ s: Store) {
+        let before = store.activeManualSession
+        savesBlocked = false
         store = s
         recompute()
         saveNow()
         syncRegions()
+        reconcileTimerNudge(before: before)
     }
 
     private func recompute() {
@@ -196,6 +204,14 @@ final class AppModel {
         let list = Ledger.dayResults(store: store, from: from, through: through, now: now)
         results = Dictionary(list.map { ($0.day, $0) }, uniquingKeysWith: { a, _ in a })
         summary = Ledger.summary(store: store, now: now)
+        // Balance through yesterday. When tracking starts after today the summary already excludes today
+        // while `todayDeltaSeconds` is still filled in informationally (Ledger.summary), so nothing to remove.
+        if Ledger.trackingStart(store: store, now: now) <= today {
+            let (settled, overflow) = summary.balanceSeconds.subtractingReportingOverflow(summary.todayDeltaSeconds)
+            settledBalanceSeconds = overflow ? summary.balanceSeconds : settled
+        } else {
+            settledBalanceSeconds = summary.balanceSeconds
+        }
         leaveBalances = Ledger.leaveBalances(store: store, asOf: today)
         let recent = list.filter { $0.day >= today.adding(days: -60, calendar: cal) && $0.day <= today }
         inbox = InboxEngine.items(store: store, dayResults: recent, now: now, monthlyExports: monthlyExports.map { $0.month })
@@ -204,9 +220,11 @@ final class AppModel {
     }
 
     private func publishWidget() {
+        guard !savesBlocked else { return } // the placeholder store must not overwrite the widget's numbers
         let timer = store.activeManualSession
         let closed = timer?.segments.filter { !$0.isOpen }.reduce(0) { $0 + $1.interval(now: now).seconds } ?? 0
-        widgets.publish(WidgetSnapshot(generatedAt: now, balanceSeconds: summary.balanceSeconds,
+        // The medium widget shows "Today" separately, so the balance it carries is the settled one.
+        widgets.publish(WidgetSnapshot(generatedAt: now, balanceSeconds: settledBalanceSeconds,
                                        monthGrossExtraSeconds: summary.monthGrossExtraSeconds, todayDeltaSeconds: summary.todayDeltaSeconds,
                                        timerRunning: timer?.state == .running, timerCategory: timer?.category,
                                        timerStartedAt: timer?.segments.last?.isOpen == true ? timer?.segments.last?.start : nil,
@@ -226,6 +244,7 @@ final class AppModel {
 
     func saveNow() {
         saveTask?.cancel()
+        guard !savesBlocked else { return }
         do {
             try repository.save(store)
         } catch {
@@ -254,7 +273,7 @@ final class AppModel {
     }
 
     func backupNow(quiet: Bool = false) async {
-        guard let data = try? StoreCodec.encode(store) else { return }
+        guard !savesBlocked, let data = try? StoreCodec.encode(store) else { return }
         do {
             _ = try await backup.write(data, now: now)
             lastBackupAt = now
@@ -276,13 +295,21 @@ final class AppModel {
     // MARK: Scene lifecycle
 
     func sceneBecameActive() {
+        if savesBlocked, let s = try? repository.load() {
+            // The file that was unreadable at launch (before the first unlock) is readable now: adopt it.
+            store = s
+            savesBlocked = false
+            alert = nil
+            syncRegions()
+            reconcileTimerNudge(before: nil)
+        }
         monthlyExports = ExportService.existingMonthlyExports()
         recompute()
         generateMonthlyExportIfNeeded()
         location.refreshCurrentState()
         Task { [weak self] in
             guard let self else { return }
-            self.notificationsAuthorized = self.notifications.isAuthorized
+            self.notificationsAuthorized = await self.notifications.authorizationStatus()
             self.iCloudAvailable = await self.backup.isAvailable()
         }
     }
@@ -327,6 +354,7 @@ final class AppModel {
     var locationAlwaysGranted: Bool { locationStatus == .authorizedAlways }
 
     private func syncRegions() {
+        guard !savesBlocked else { return } // an empty placeholder store would stop monitoring every region
         guard locationStatus == .authorizedAlways || locationStatus == .authorizedWhenInUse else { return }
         location.syncRegions(store.locations)
     }
