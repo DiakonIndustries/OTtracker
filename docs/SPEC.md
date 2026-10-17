@@ -426,3 +426,27 @@ docs/                           SPEC.md (this), IMPORT_TEMPLATE.md, BUILD.md
 Identifiers: bundle `com.diakonindustries.ottracker`, widgets
 `com.diakonindustries.ottracker.widgets`, App Group `group.com.diakonindustries.ottracker`,
 iCloud container `iCloud.com.diakonindustries.ottracker`.
+
+---
+
+## 9. Decisions recorded during verification
+
+Questions the verifiers raised against the first draft, and how they were settled. The code
+and tests follow these.
+
+| Topic | Decision |
+|---|---|
+| Balance lower bound (§4.6) | Σ delta runs from `max(bankStartingAsOf, first recorded fact)` ("tracking start"). Workdays before anyone tracked are never charged as no-shows. Month, week and year sums use the same bound so they agree with the balance. |
+| Leave usage (§4.6) | A starting balance "as of" a date already reflects earlier usage: entries and accrual boundaries before `config.asOf` are ignored. |
+| In-progress day (§4.3) | Only elapsed time can be a deficit: deductions are computed against `[S, min(E, now)]`; time-off relief is capped at the elapsed window; flex spend is immediate; `.noShow` still waits for `E`. |
+| Overlapping sites (§4.7) | Time at any work location is presence: overlapping sessions merge regardless of location, nothing is cut, the day is flagged. The gap default looks at the location of the session that ended the merged block. |
+| Gap beside a regular manual segment (§4.3) | Undecidable (no session carries the decision, no location): deducted, flagged `.gapUndecided`, and no Inbox item is raised for it. |
+| Future days | Days after today carry only kind/window/expected. Time off, flex, adjustments and manual blocks dated in the future move nothing until the day arrives; leave balances still count future entries only when asked for a future `asOf`. |
+| Exit items on no-window days (§5.3) | A geofence departure on a weekend, holiday or day off raises `exit:<sessionID>` with the session's own presence that day as the effect. `InboxEngine.exitEffectSeconds` is the single source for the amount shown in the item and in the notification. |
+| `early:<day>` items | Raised for today and yesterday only. |
+| `orphanExit:<eventID>` items | Geofence-sourced exits from the last 14 days only; Remove/Delete on an exit item dismisses the orphan keys its exit events would otherwise raise. |
+| Flap filter (§5.1) | A quick re-entry reopens the previous session only when no session at any location began after that session's exit. |
+| Inferred geofence state at launch | Never synthesises an exit; an inferred arrival is accepted only when nothing is open at that location. |
+| Import settings (§6.3) | Merge never changes this phone's settings. Replace applies the file's settings when the file is the app's own Excel or JSON. A restored backup is stamped with this app's schema version. |
+| Lossless round trip (§6.1) | The Excel round-trips every fact and every number. `createdAt` of locations and manual sessions, schedule notes and dismissed Inbox keys travel only in the JSON backup. Instants in the repeated hour of a DST fall-back night cannot be represented by an Excel date; durations are preserved. |
+| Ranged Excel exports (§6.1) | The Days sheet's running balance continues the real bank balance at the day before the range; rows before tracking start show their delta but do not move it. |
