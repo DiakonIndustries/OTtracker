@@ -54,16 +54,17 @@ public enum ExportBuilder {
 
     /// The workbook for `dayResults` (already computed for `from...through`).
     ///
-    /// The Days sheet's running balance is `settings.bankStartingSeconds` plus the running sum of
+    /// The Days sheet's running balance starts at `openingBalanceSeconds` (or `settings.bankStartingSeconds`) plus the running sum of
     /// the deltas in `dayResults`: pass results starting at `settings.bankStartingAsOf` to get the
     /// true bank balance in that column.
     public static func workbook(store: Store, dayResults: [DayResult], from: DayKey, through: DayKey, now: Date,
-                                summary: LedgerSummary = LedgerSummary(), leaveBalances: [LeaveBalance] = []) -> Workbook {
+                                summary: LedgerSummary = LedgerSummary(), leaveBalances: [LeaveBalance] = [],
+                                openingBalanceSeconds: Int? = nil) -> Workbook {
         let cal = store.calendar
         let range = RangeFilter(from: from, through: through, calendar: cal, now: now)
         return Workbook(sheets: [
             summarySheet(store: store, from: from, through: through, now: now, summary: summary, leaveBalances: leaveBalances),
-            daysSheet(store: store, dayResults: dayResults),
+            daysSheet(store: store, dayResults: dayResults, now: now, openingBalanceSeconds: openingBalanceSeconds),
             presenceSheet(store: store, range: range),
             manualSheet(store: store, range: range, now: now),
             timeOffSheet(store: store, range: range),
@@ -79,9 +80,11 @@ public enum ExportBuilder {
 
     /// `.xlsx` bytes for the range.
     public static func xlsx(store: Store, dayResults: [DayResult], from: DayKey, through: DayKey, now: Date,
-                            summary: LedgerSummary = LedgerSummary(), leaveBalances: [LeaveBalance] = []) throws -> Data {
+                            summary: LedgerSummary = LedgerSummary(), leaveBalances: [LeaveBalance] = [],
+                            openingBalanceSeconds: Int? = nil) throws -> Data {
         try XLSXWriter.write(workbook(store: store, dayResults: dayResults, from: from, through: through, now: now,
-                                      summary: summary, leaveBalances: leaveBalances),
+                                      summary: summary, leaveBalances: leaveBalances,
+                                   openingBalanceSeconds: openingBalanceSeconds),
                              timeZone: store.settings.timeZone)
     }
 
@@ -153,12 +156,20 @@ public enum ExportBuilder {
         return Worksheet(name: "Summary", rows: rows)
     }
 
-    static func daysSheet(store: Store, dayResults: [DayResult]) -> Worksheet {
+    /// `openingBalanceSeconds` is the bank balance at the end of the day before the first row
+    /// (callers exporting a range pass `Ledger.balance(asOf: from - 1 day)`); nil means the rows
+    /// start at `settings.bankStartingSeconds`. Days before `Ledger.trackingStart` show their
+    /// delta but never move the running balance, exactly like `Ledger.balance`.
+    static func daysSheet(store: Store, dayResults: [DayResult], now: Date, openingBalanceSeconds: Int?) -> Worksheet {
         let cal = store.calendar
         var rows: [[Cell]] = [daysHeader.map { .string($0) }]
-        var running = store.settings.bankStartingSeconds
+        let trackingStart = Ledger.trackingStart(store: store, now: now)
+        var running = openingBalanceSeconds ?? store.settings.bankStartingSeconds
         for r in dayResults {
-            running += r.deltaSeconds
+            if r.day >= trackingStart {
+                let (sum, overflow) = running.addingReportingOverflow(r.deltaSeconds)
+                running = overflow ? (r.deltaSeconds > 0 ? Int.max : Int.min) : sum
+            }
             let earlyCounted = r.extraBeforeCounted ? r.extraBeforeSeconds : 0
             func d(_ s: Int) -> Cell { .string(ExchangeFormat.clock(s)) }
             rows.append([

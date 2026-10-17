@@ -46,8 +46,14 @@ enum ExportService {
         let results = Ledger.dayResults(store: store, from: from, through: through, now: now)
         let summary = Ledger.summary(store: store, now: asOf)
         let balances = Ledger.leaveBalances(store: store, asOf: min(through, DayKey(now, calendar: cal)))
+        // The Days sheet's running balance must continue the real bank balance when the range
+        // starts after tracking began, not restart at the configured starting balance.
+        let trackingStart = Ledger.trackingStart(store: store, now: now)
+        let opening: Int? = from > trackingStart
+            ? Ledger.balance(store: store, asOf: from.adding(days: -1, calendar: cal), now: now)
+            : nil
         let data = try ExportBuilder.xlsx(store: store, dayResults: results, from: from, through: through, now: now,
-                                          summary: summary, leaveBalances: balances)
+                                          summary: summary, leaveBalances: balances, openingBalanceSeconds: opening)
         let url = directory.appendingPathComponent(filename)
         try data.write(to: url, options: .atomic)
         return url
