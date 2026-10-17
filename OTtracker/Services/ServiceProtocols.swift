@@ -7,7 +7,9 @@ struct RegionCrossing: Hashable {
     var locationID: UUID
     var kind: LocationEventKind
     var at: Date
-    /// True when inferred from `requestState` at launch rather than a live crossing.
+    /// True when this comes from a `didDetermineState` callback rather than `didEnterRegion` / `didExitRegion`.
+    /// CoreLocation delivers that callback after `requestState` *and* on every boundary transition (right
+    /// before the matching enter/exit), so `at` is only the moment the state was observed, never a crossing time.
     var inferredFromState: Bool
 }
 
@@ -48,11 +50,16 @@ enum NotificationResponse: Hashable {
 
 @MainActor
 protocol NotificationServicing: AnyObject {
+    /// Last known authorization; refreshed asynchronously, so prefer `authorizationStatus()` for a fresh answer.
     var isAuthorized: Bool { get }
     var onResponse: ((NotificationResponse) -> Void)? { get set }
     func requestAuthorization() async -> Bool
+    /// Asks the system for the current authorization and returns whether notifications may be shown.
+    func authorizationStatus() async -> Bool
     func post(_ notification: AppNotification)
     func cancelTimerNudge()
+    /// Removes the exit notification for `sessionID` (pending or delivered); used when a flap reopen undoes an exit.
+    func cancelExitNotification(sessionID: UUID)
 }
 
 @MainActor

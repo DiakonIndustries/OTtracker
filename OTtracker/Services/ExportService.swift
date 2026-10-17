@@ -36,11 +36,18 @@ enum ExportService {
     }
 
     /// Writes an xlsx for the range into `directory` and returns its URL.
-    static func writeXLSX(store: Store, from: DayKey, through: DayKey, now: Date, summary: LedgerSummary,
-                          leaveBalances: [LeaveBalance], to directory: URL, filename: String) throws -> URL {
+    ///
+    /// The Summary sheet (balance, month/week/YTD figures, leave balances) is taken at the end of the
+    /// range when it ends before today, so the automatic monthly file describes that month rather than
+    /// the day it was generated; ranges that run through today use `now`.
+    static func writeXLSX(store: Store, from: DayKey, through: DayKey, now: Date, to directory: URL, filename: String) throws -> URL {
+        let cal = store.calendar
+        let asOf = min(now, through.end(in: cal).addingTimeInterval(-1))
         let results = Ledger.dayResults(store: store, from: from, through: through, now: now)
+        let summary = Ledger.summary(store: store, now: asOf)
+        let balances = Ledger.leaveBalances(store: store, asOf: min(through, DayKey(now, calendar: cal)))
         let data = try ExportBuilder.xlsx(store: store, dayResults: results, from: from, through: through, now: now,
-                                          summary: summary, leaveBalances: leaveBalances)
+                                          summary: summary, leaveBalances: balances)
         let url = directory.appendingPathComponent(filename)
         try data.write(to: url, options: .atomic)
         return url

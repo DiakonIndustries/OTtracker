@@ -7,14 +7,24 @@ struct HomeBalanceHeader: View {
 
     var body: some View {
         let summary = model.summary
+        // The headline is the settled balance (through yesterday); today's provisional delta is shown
+        // separately so a workday morning does not read as "balance minus the whole scheduled window".
+        let settled = model.settledBalanceSeconds
         VStack(alignment: .leading, spacing: 6) {
             Text("Bank balance")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            DeltaText(seconds: summary.balanceSeconds, font: .system(size: 46, weight: .bold, design: .rounded))
-            Text(HomeBalanceHeader.sentence(for: summary.balanceSeconds))
+            DeltaText(seconds: settled, font: .system(size: 46, weight: .bold, design: .rounded))
+            Text(HomeBalanceHeader.sentence(for: settled))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text("Through yesterday · today so far")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                DeltaText(seconds: summary.todayDeltaSeconds, font: .caption.weight(.semibold))
+            }
+            .lineLimit(1)
             Divider()
                 .padding(.vertical, 4)
             HStack(alignment: .top, spacing: 8) {

@@ -44,13 +44,25 @@ final class ICloudBackupService: BackupServicing {
         for f in files.dropFirst(keepCount) { try? FileManager.default.removeItem(at: f) }
     }
 
+    /// Every backup in the container, newest first. On a new phone the files are still in iCloud and
+    /// appear locally as `.OTtracker-x.json.icloud` placeholders; those are listed under their real
+    /// name and their download is started so `read` can wait for them.
     func list() async throws -> [BackupInfo] {
         try await Task.detached(priority: .utility) { [self] in
             let dir = try self.backupsDirectory()
             let urls = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])
-            return urls.filter { $0.pathExtension == "json" }.compactMap { url -> BackupInfo? in
+            return urls.compactMap { url -> BackupInfo? in
+                var name = url.lastPathComponent
+                var real = url
+                if name.hasPrefix("."), name.hasSuffix(".icloud") {
+                    // Not yet downloaded from iCloud: ".OTtracker-x.json.icloud" -> "OTtracker-x.json"
+                    name = String(name.dropFirst().dropLast(".icloud".count))
+                    real = dir.appendingPathComponent(name)
+                    try? FileManager.default.startDownloadingUbiquitousItem(at: real)
+                }
+                guard name.hasPrefix("OTtracker-"), name.hasSuffix(".json") else { return nil }
                 let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-                return BackupInfo(url: url, modified: values?.contentModificationDate ?? .distantPast, sizeBytes: values?.fileSize ?? 0)
+                return BackupInfo(url: real, modified: values?.contentModificationDate ?? .distantPast, sizeBytes: values?.fileSize ?? 0)
             }.sorted { $0.modified > $1.modified }
         }.value
     }
@@ -60,15 +72,18 @@ final class ICloudBackupService: BackupServicing {
             // Make sure the file is downloaded from iCloud before reading.
             try? FileManager.default.startDownloadingUbiquitousItem(at: info.url)
             var attempts = 0
-            while attempts < 20 {
-                if let values = try? info.url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
-                   let status = values.ubiquitousItemDownloadingStatus, status != .current {
-                    try await Task.sleep(nanoseconds: 500_000_000)
-                    attempts += 1
-                    continue
-                }
-                break
+            while attempts < 40 {
+                // Resource values are cached on the URL's backing NSURL and are never purged off the
+                // main thread, so probe a fresh URL value each iteration.
+                let probe = URL(fileURLWithPath: info.url.path)
+                let exists = FileManager.default.fileExists(atPath: probe.path)
+                let status = (try? probe.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?.ubiquitousItemDownloadingStatus
+                if exists, status == nil || status == .current { break }
+                try await Task.sleep(nanoseconds: 500_000_000)
+                attempts += 1
             }
+            // On timeout, read whatever local copy exists (.downloaded); otherwise fail clearly.
+            guard FileManager.default.fileExists(atPath: info.url.path) else { throw BackupError.notDownloaded }
             return try Data(contentsOf: info.url)
         }.value
     }
@@ -76,10 +91,12 @@ final class ICloudBackupService: BackupServicing {
 
 enum BackupError: LocalizedError {
     case unavailable
+    case notDownloaded
 
     var errorDescription: String? {
         switch self {
         case .unavailable: return "iCloud Drive is not available. Sign in to iCloud and enable iCloud Drive for OTtracker."
+        case .notDownloaded: return "This backup has not finished downloading from iCloud. Check your connection and try again in a moment."
         }
     }
 }

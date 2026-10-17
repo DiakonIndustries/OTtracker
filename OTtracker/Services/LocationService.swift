@@ -30,16 +30,21 @@ final class LocationService: NSObject, LocationServicing, CLLocationManagerDeleg
         guard CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self) else { return }
         let wanted = Array(locations.filter { $0.isActive }.prefix(20))
         let wantedIDs = Set(wanted.map { $0.id })
+        // Decide per region here instead of re-reading `monitoredRegions` after `stopMonitoring`
+        // (it is not updated synchronously), and compare with a tolerance so a round-tripped
+        // coordinate or radius does not re-register an unchanged region.
+        var kept: Set<UUID> = []
         for region in manager.monitoredRegions {
-            guard let id = UUID(uuidString: region.identifier) else { manager.stopMonitoring(for: region); continue }
-            if let loc = wanted.first(where: { $0.id == id }), let circ = region as? CLCircularRegion,
-               circ.center.latitude == loc.latitude, circ.center.longitude == loc.longitude, circ.radius == clampRadius(loc.radiusMeters) {
-                continue // unchanged
+            guard let id = UUID(uuidString: region.identifier), let loc = wanted.first(where: { $0.id == id }),
+                  let circ = region as? CLCircularRegion,
+                  abs(circ.center.latitude - loc.latitude) < 1e-7, abs(circ.center.longitude - loc.longitude) < 1e-7,
+                  abs(circ.radius - clampRadius(loc.radiusMeters)) < 0.5 else {
+                manager.stopMonitoring(for: region)
+                continue
             }
-            manager.stopMonitoring(for: region)
+            kept.insert(id)
         }
-        let monitored = Set(manager.monitoredRegions.compactMap { UUID(uuidString: $0.identifier) })
-        for loc in wanted where !monitored.contains(loc.id) {
+        for loc in wanted where !kept.contains(loc.id) {
             let region = CLCircularRegion(center: CLLocationCoordinate2D(latitude: loc.latitude, longitude: loc.longitude),
                                           radius: clampRadius(loc.radiusMeters), identifier: loc.id.uuidString)
             region.notifyOnEntry = true
