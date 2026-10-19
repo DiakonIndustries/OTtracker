@@ -111,7 +111,7 @@ struct LogView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                ForEach(weekStarts, id: \.self) { start in
+                ForEach(weekStarts.filter { !visibleDays(in: $0).isEmpty }, id: \.self) { start in
                     let days = visibleDays(in: start)
                     Section {
                         ForEach(days, id: \.self) { day in
@@ -155,16 +155,18 @@ struct LogView: View {
         return (0..<weeksShown).map { current.adding(days: -7 * $0, calendar: cal) }
     }
 
-    /// Days of the week up to and including today, newest first.
+    /// Days of the week from tracking start up to and including today, newest first.
     private func visibleDays(in weekStart: DayKey) -> [DayKey] {
         let cal = model.calendar
+        let first = max(weekStart, model.trackingStart)
         let last = min(weekStart.adding(days: 6, calendar: cal), model.today)
-        return Array(DayKey.days(from: weekStart, through: last, calendar: cal).reversed())
+        guard first <= last else { return [] }
+        return Array(DayKey.days(from: first, through: last, calendar: cal).reversed())
     }
 
     private var canShowOlder: Bool {
         guard let oldest = weekStarts.last else { return false }
-        return oldest > model.earliestDay
+        return oldest > model.trackingStart
     }
 
     // MARK: Routes

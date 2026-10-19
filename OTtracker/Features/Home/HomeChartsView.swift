@@ -85,13 +85,14 @@ struct HomeChartsView: View {
         let cal = model.calendar
         let today = model.today
         let thisWeek = Format.weekStart(of: today, cal)
+        let start0 = model.trackingStart
         var out: [HomeBar] = []
         for back in stride(from: 7, through: 0, by: -1) {
             let start = thisWeek.adding(days: -7 * back, calendar: cal)
             var total = 0
             for offset in 0..<7 {
                 let day = start.adding(days: offset, calendar: cal)
-                if day <= today {
+                if day <= today && day >= start0 {
                     total += model.dayResult(for: day).deltaSeconds
                 }
             }
@@ -114,8 +115,11 @@ struct HomeChartsView: View {
         for first in firsts.reversed() {
             let last = min(Format.lastOfMonth(first, cal), today)
             var net = 0
-            for day in DayKey.days(from: first, through: last, calendar: cal) {
-                net += model.dayResult(for: day).deltaSeconds
+            let from = max(first, model.trackingStart)
+            if from <= last {
+                for day in DayKey.days(from: from, through: last, calendar: cal) {
+                    net += model.dayResult(for: day).deltaSeconds
+                }
             }
             out.append(HomeBar(id: first, label: HomeChartFormat.shortMonth(first, cal), seconds: net))
         }

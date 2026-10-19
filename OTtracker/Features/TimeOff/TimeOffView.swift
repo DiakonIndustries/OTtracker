@@ -8,6 +8,7 @@ struct TimeOffView: View {
     @State private var editor: TimeOffEditorPayload?
     @State private var pendingDelete: TimeOffEntry?
     @State private var confirmDelete = false
+    @State private var balanceTypeID: UUID?
 
     init() {}
 
@@ -35,6 +36,9 @@ struct TimeOffView: View {
                 moreSection
             }
             .navigationTitle("Time Off")
+            .navigationDestination(item: $balanceTypeID) { id in
+                TimeOffBalanceEditor(typeID: id)
+            }
             .sheet(item: $editor) { payload in
                 TimeOffEditorView(entry: payload.entry, defaultDay: payload.defaultDay, defaultKind: payload.defaultKind)
             }
@@ -58,8 +62,8 @@ struct TimeOffView: View {
             VStack(spacing: 14) {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     ForEach(balanceTypes) { type in
-                        NavigationLink {
-                            TimeOffBalanceEditor(typeID: type.id)
+                        Button {
+                            balanceTypeID = type.id
                         } label: {
                             TimeOffTile(title: type.name,
                                         seconds: model.leaveBalance(for: type.id)?.remainingSeconds ?? 0,
@@ -70,18 +74,18 @@ struct TimeOffView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    Button {
-                        editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: .flex)
-                    } label: {
-                        TimeOffTile(title: "Flex bank",
-                                    seconds: model.settledBalanceSeconds,
-                                    caption: "Tap to book a flex day",
-                                    symbol: "hourglass",
-                                    color: .positive,
-                                    signed: true)
-                    }
-                    .buttonStyle(.plain)
                 }
+                Button {
+                    editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: .flex)
+                } label: {
+                    TimeOffTile(title: "Flex bank",
+                                seconds: model.settledBalanceSeconds,
+                                caption: "Tap to book a flex day from your bank",
+                                symbol: "hourglass",
+                                color: .positive,
+                                signed: true)
+                }
+                .buttonStyle(.plain)
                 Button {
                     editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: nil)
                 } label: {
@@ -126,6 +130,7 @@ struct TimeOffView: View {
         } label: {
             TimeOffEntryRow(entry: entry)
         }
+        .tint(.primary)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
                 pendingDelete = entry

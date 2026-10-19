@@ -163,6 +163,9 @@ final class AppModel {
 
     var earliestDay: DayKey { Ledger.earliestDay(store: store, now: now) }
 
+    /// First day that counts toward the bank: max(starting-balance date, first recorded fact).
+    var trackingStart: DayKey { Ledger.trackingStart(store: store, now: now) }
+
     // MARK: Mutation core
 
     /// Every change goes through here: apply, recompute, save (debounced), back up (debounced).
