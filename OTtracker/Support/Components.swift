@@ -3,9 +3,9 @@ import OTCore
 
 extension Color {
     /// Positive balance / extra time.
-    static let positive = Color.green
+    static let positive = Color(red: 0.13, green: 0.66, blue: 0.44)
     /// Deficit / deducted time.
-    static let negative = Color.red
+    static let negative = Color(red: 0.91, green: 0.32, blue: 0.29)
 }
 
 /// A signed duration coloured by sign: green for extra, red for deficit, secondary for zero.

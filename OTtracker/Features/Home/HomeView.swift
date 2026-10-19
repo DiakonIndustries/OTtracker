@@ -1,19 +1,19 @@
 import SwiftUI
 import OTCore
 
-/// The Home tab: balance, timer, today, Inbox nudge, charts and leave balances.
+/// The Today tab: the bank, what is happening right now, anything to review, the trend and leave.
 struct HomeView: View {
     @Environment(AppModel.self) private var model
+    @State private var sheet: HomeAddSheet? = nil
 
     init() {}
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: HomeStyle.cardSpacing) {
-                    HomeBalanceHeader()
-                    HomeTimerCard()
-                    HomeTodayCard()
+                VStack(spacing: Theme.spacing) {
+                    HomeHero()
+                    HomeStatusCard()
                     if model.inboxCount > 0 {
                         HomeInboxNudge()
                     }
@@ -23,10 +23,11 @@ struct HomeView: View {
                     }
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 4)
+                .padding(.bottom, 28)
             }
-            .background(HomeStyle.pageBackground)
-            .navigationTitle("OTtracker")
+            .background(Theme.page)
+            .navigationTitle("Today")
             .navigationDestination(for: HomeRoute.self) { route in
                 switch route {
                 case .day(let day):
@@ -34,22 +35,39 @@ struct HomeView: View {
                 }
             }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        model.openSettings()
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button {
-                            model.selectedTab = .settings
-                            model.pendingRoute = .export
-                        } label: {
-                            Label("Export…", systemImage: "square.and.arrow.up")
-                        }
-                        Button {
-                            Task { await model.backupNow() }
-                        } label: {
-                            Label("Back up now", systemImage: "icloud.and.arrow.up")
+                        ForEach(HomeAddSheet.allCases) { kind in
+                            Button {
+                                sheet = kind
+                            } label: {
+                                Label(kind.title, systemImage: kind.systemImage)
+                            }
                         }
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        Image(systemName: "plus")
                     }
+                    .accessibilityLabel("Add")
+                }
+            }
+            .sheet(item: $sheet) { which in
+                switch which {
+                case .presence:
+                    PresenceEditorView(session: nil, defaultDay: model.today, onDone: { sheet = nil })
+                case .manual:
+                    ManualSessionEditorView(session: nil, defaultDay: model.today, onDone: { sheet = nil })
+                case .timeOff:
+                    TimeOffEditorView(entry: nil, defaultDay: model.today, onDone: { sheet = nil })
+                case .adjustment:
+                    AdjustmentEditorView(adjustment: nil, defaultDay: model.today, onDone: { sheet = nil })
                 }
             }
         }

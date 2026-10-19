@@ -40,6 +40,12 @@ struct SettingsView: View {
                 aboutSection
             }
             .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { model.showSettings = false }
+                        .fontWeight(.semibold)
+                }
+            }
             .navigationDestination(for: SettingsDestination.self) { destination in
                 switch destination {
                 case .schedules:
@@ -266,15 +272,12 @@ struct SettingsView: View {
         guard let route else { return }
         switch route {
         case .locations:
-            model.selectedTab = .settings
             path = [.locations]
             model.consumeRoute()
         case .importFile:
-            model.selectedTab = .settings
             path = [.importFile]
             model.consumeRoute()
         case .export:
-            model.selectedTab = .settings
             path = [.export]
             model.consumeRoute()
         default:

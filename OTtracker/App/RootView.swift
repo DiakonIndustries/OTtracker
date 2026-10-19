@@ -12,24 +12,25 @@ struct RootView: View {
             } else {
                 TabView(selection: $model.selectedTab) {
                     HomeView()
-                        .tabItem { Label("Home", systemImage: "clock") }
+                        .tabItem { Label("Today", systemImage: "sun.max") }
                         .tag(AppModel.Tab.home)
                     LogView()
-                        .tabItem { Label("Log", systemImage: "list.bullet.rectangle") }
+                        .tabItem { Label("History", systemImage: "calendar") }
                         .tag(AppModel.Tab.log)
                     InboxView()
                         .tabItem { Label("Inbox", systemImage: "tray") }
                         .badge(model.inboxCount)
                         .tag(AppModel.Tab.inbox)
                     TimeOffView()
-                        .tabItem { Label("Time Off", systemImage: "sun.max") }
+                        .tabItem { Label("Time Off", systemImage: "beach.umbrella") }
                         .tag(AppModel.Tab.timeOff)
+                }
+                .sheet(isPresented: $model.showSettings) {
                     SettingsView()
-                        .tabItem { Label("Settings", systemImage: "gearshape") }
-                        .tag(AppModel.Tab.settings)
                 }
             }
         }
+        .fontDesign(.rounded)
         .alert(item: $model.alert) { a in
             Alert(title: Text(a.title), message: Text(a.message), dismissButton: .default(Text("OK")))
         }

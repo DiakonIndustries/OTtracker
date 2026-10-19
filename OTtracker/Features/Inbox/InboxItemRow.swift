@@ -75,11 +75,7 @@ struct InboxItemRow: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: InboxStyle.symbol(for: item.kind))
-                .font(.title3)
-                .foregroundStyle(InboxStyle.color(for: item.kind))
-                .frame(width: 28, alignment: .center)
-                .padding(.top, 2)
+            IconBadge(systemImage: InboxStyle.symbol(for: item.kind), color: InboxStyle.color(for: item.kind), size: 36)
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.title)
                     .font(.headline)
@@ -158,12 +154,14 @@ struct InboxItemRow: View {
             Button(action.title, role: .destructive) { onAction(action) }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .buttonBorderShape(.capsule)
                 .tint(.red)
                 .lineLimit(1)
         } else {
             Button(action.title) { onAction(action) }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .buttonBorderShape(.capsule)
                 .lineLimit(1)
         }
     }

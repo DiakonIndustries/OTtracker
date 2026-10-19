@@ -14,11 +14,10 @@ struct TimeOffView: View {
     var body: some View {
         NavigationStack {
             List {
-                balancesSection
-                bankSection
+                summarySection
                 if upcoming.isEmpty && recentPast.isEmpty {
                     Section {
-                        Text("No time off booked yet. Tap + to book PTO, personal time or a flex day.")
+                        Text("Nothing booked yet. Book PTO, personal time or a flex day above.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -36,16 +35,6 @@ struct TimeOffView: View {
                 moreSection
             }
             .navigationTitle("Time Off")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: nil)
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel("Book time off")
-                }
-            }
             .sheet(item: $editor) { payload in
                 TimeOffEditorView(entry: payload.entry, defaultDay: payload.defaultDay, defaultKind: payload.defaultKind)
             }
@@ -63,39 +52,52 @@ struct TimeOffView: View {
 
     // MARK: Sections
 
-    @ViewBuilder
-    private var balancesSection: some View {
-        Section("Balances") {
-            if balanceTypes.isEmpty {
-                Text("No type tracks a balance. Turn on “Tracks balance” for a type to see it here.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(balanceTypes) { type in
-                    NavigationLink {
-                        TimeOffBalanceEditor(typeID: type.id)
-                    } label: {
-                        TimeOffBalanceCard(name: type.name, balance: model.leaveBalance(for: type.id))
-                    }
-                }
-            }
-        }
-    }
-
-    private var bankSection: some View {
+    /// Balance tiles (each leave type and the flex bank) and the one "book" button.
+    private var summarySection: some View {
         Section {
-            LabeledContent("Flex time available") {
-                DeltaText(seconds: model.settledBalanceSeconds, font: .title3)
+            VStack(spacing: 14) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                    ForEach(balanceTypes) { type in
+                        NavigationLink {
+                            TimeOffBalanceEditor(typeID: type.id)
+                        } label: {
+                            TimeOffTile(title: type.name,
+                                        seconds: model.leaveBalance(for: type.id)?.remainingSeconds ?? 0,
+                                        caption: "left",
+                                        symbol: type.kind == .pto ? "airplane" : "person.fill",
+                                        color: type.kind == .pto ? .blue : .purple,
+                                        signed: false)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Button {
+                        editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: .flex)
+                    } label: {
+                        TimeOffTile(title: "Flex bank",
+                                    seconds: model.settledBalanceSeconds,
+                                    caption: "Tap to book a flex day",
+                                    symbol: "hourglass",
+                                    color: .positive,
+                                    signed: true)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button {
+                    editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: nil)
+                } label: {
+                    Label("Book time off", systemImage: "plus")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .buttonBorderShape(.capsule)
             }
-            Button {
-                editor = TimeOffEditorPayload(entry: nil, defaultDay: model.today, defaultKind: .flex)
-            } label: {
-                Label("Book a flex day", systemImage: "calendar.badge.minus")
-            }
-        } header: {
-            Text("Bank")
+            .padding(.vertical, 4)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
         } footer: {
-            Text("A flex day lowers the hours expected that day and takes the same amount out of your bank.")
+            Text("A flex day takes the hours out of your bank instead of your PTO.")
         }
     }
 
@@ -250,4 +252,40 @@ struct TimeOffEntryRow: View {
 
 #Preview {
     TimeOffView().environment(AppModel.preview())
+}
+
+/// One balance tile at the top of Time Off.
+struct TimeOffTile: View {
+    let title: String
+    let seconds: Int
+    let caption: String
+    let symbol: String
+    let color: Color
+    let signed: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            IconBadge(systemImage: symbol, color: color, size: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(signed ? Format.hm(seconds, signed: true) : Format.hm(seconds))
+                    .font(.title2.weight(.bold))
+                    .monospacedDigit()
+                    .foregroundStyle(seconds < 0 ? Color.negative : Color.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Text(caption)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .contentShape(Rectangle())
+    }
 }

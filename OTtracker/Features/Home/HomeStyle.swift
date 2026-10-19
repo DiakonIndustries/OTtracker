@@ -1,48 +1,32 @@
 import SwiftUI
-import UIKit
 import OTCore
 
-/// Navigation values pushed from the Home tab's stack.
+/// Navigation values pushed from the Today tab's stack.
 enum HomeRoute: Hashable {
     case day(DayKey)
 }
 
-/// Shared colours and metrics for the Home cards.
-enum HomeStyle {
-    static let pageBackground = Color(uiColor: .systemGroupedBackground)
-    static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
-    static let cardCornerRadius: CGFloat = 16
-    static let cardSpacing: CGFloat = 16
+/// The "add" editors reachable from the Today toolbar.
+enum HomeAddSheet: String, Identifiable, CaseIterable {
+    case presence, manual, timeOff, adjustment
 
-    /// Capsule colour for a day flag.
-    static func color(for flag: DayFlag) -> Color {
-        switch flag {
-        case .noShow: return .negative
-        case .openPresence: return .blue
-        case .earlyArrivalUncounted: return .orange
-        case .gapUndecided: return .orange
-        case .graceApplied: return .secondary
-        case .overlappingLocations: return .orange
-        case .future: return .secondary
-        case .inProgress: return .blue
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .presence: return "Arrival or departure"
+        case .manual: return "Work elsewhere"
+        case .timeOff: return "Time off"
+        case .adjustment: return "Adjustment"
         }
     }
-}
 
-/// Rounded, grouped-background container used by every Home card.
-struct HomeCardModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(HomeStyle.cardBackground,
-                        in: RoundedRectangle(cornerRadius: HomeStyle.cardCornerRadius, style: .continuous))
-    }
-}
-
-extension View {
-    /// Wraps the view in a Home card.
-    func homeCard() -> some View {
-        modifier(HomeCardModifier())
+    var systemImage: String {
+        switch self {
+        case .presence: return "mappin.and.ellipse"
+        case .manual: return "laptopcomputer"
+        case .timeOff: return "beach.umbrella"
+        case .adjustment: return "plusminus"
+        }
     }
 }

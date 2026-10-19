@@ -1,7 +1,7 @@
 import SwiftUI
 import OTCore
 
-/// Remaining balance of every leave type that tracks one. Tap to open the Time Off tab.
+/// Remaining balance of every leave type that tracks one. Tap to open Time Off.
 struct HomeLeaveStrip: View {
     @Environment(AppModel.self) private var model
 
@@ -10,66 +10,52 @@ struct HomeLeaveStrip: View {
         Button {
             model.selectedTab = .timeOff
         } label: {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text("Leave balances")
+                    Text("Time off left")
                         .font(.headline)
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.tertiary)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), alignment: .leading)], alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
                     ForEach(types) { type in
-                        HomeLeaveCell(name: type.name, remainingSeconds: remainingSeconds(for: type))
+                        HomeLeaveCell(name: type.name, remainingSeconds: model.leaveBalance(for: type.id)?.remainingSeconds)
                     }
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .homeCard()
-    }
-
-    private func remainingSeconds(for type: TimeOffType) -> Int? {
-        guard let balance = model.leaveBalance(for: type.id) else { return nil }
-        return balance.remainingSeconds
+        .card()
     }
 }
 
-/// Name over remaining hours for one leave type.
+/// Name over remaining time for one leave type.
 struct HomeLeaveCell: View {
     let name: String
     let remainingSeconds: Int?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(name)
-                .font(.caption)
+                .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text(valueText)
+            Text(remainingSeconds.map { Format.hm($0) } ?? "—")
                 .font(.title3.weight(.semibold))
                 .monospacedDigit()
-                .foregroundStyle(valueColor)
-            Text("remaining")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle((remainingSeconds ?? 0) < 0 ? Color.negative : Color.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var valueText: String {
-        guard let remainingSeconds else { return "—" }
-        return Format.hm(remainingSeconds)
-    }
-
-    private var valueColor: Color {
-        guard let remainingSeconds else { return .secondary }
-        return remainingSeconds < 0 ? Color.negative : Color.primary
+        .background(Theme.page, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
 #Preview {
-    HomeLeaveStrip().environment(AppModel.preview())
+    HomeLeaveStrip().padding().environment(AppModel.preview())
 }

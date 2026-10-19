@@ -2,70 +2,90 @@ import SwiftUI
 import Charts
 import OTCore
 
-/// One bar of the weekly chart: the week starting `start`, net delta in hours.
-struct HomeWeekBar: Identifiable, Hashable {
-    let start: DayKey
+/// One bar of the trend chart: a week or a month, net change in hours.
+struct HomeBar: Identifiable, Hashable {
+    let id: DayKey
     let label: String
-    let hours: Double
+    let seconds: Int
 
-    var id: DayKey { start }
+    var hours: Double { Double(seconds) / 3600 }
 }
 
-/// One month of the trend chart.
-struct HomeMonthPoint: Identifiable, Hashable {
-    let month: DayKey
-    let label: String
-    let grossExtraHours: Double
-    let netHours: Double
+/// Which period the trend chart groups by.
+enum HomeChartRange: String, CaseIterable, Identifiable {
+    case weeks = "Weeks"
+    case months = "Months"
 
-    var id: DayKey { month }
+    var id: String { rawValue }
 }
 
-private let homeGrossSeries = "Gross extra"
-private let homeNetSeries = "Net delta"
-
-/// Weekly bars for the last 8 weeks and the monthly trend for the last 12 months.
+/// Net change per week (last 8) or per month (last 12), green above zero and red below.
 struct HomeChartsView: View {
     @Environment(AppModel.self) private var model
+    @State private var range: HomeChartRange = .weeks
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            weeklySection
-            monthlySection
-        }
-        .homeCard()
-    }
-
-    // MARK: Weekly bars
-
-    private var weeklySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Weekly")
-                .font(.headline)
-            Text("Net hours per week, last 8 weeks")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            let bars = weekBars
+        let bars = range == .weeks ? weekBars : monthBars
+        let total = bars.reduce(0) { $0 + $1.seconds }
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Trend")
+                        .font(.headline)
+                    HStack(spacing: 4) {
+                        Text(range == .weeks ? "Last 8 weeks" : "Last 12 months")
+                        Text("·")
+                        Text(Format.hm(total, signed: true))
+                            .fontWeight(.semibold)
+                            .foregroundStyle(total > 0 ? Color.positive : (total < 0 ? Color.negative : Color.secondary))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Range", selection: $range) {
+                    ForEach(HomeChartRange.allCases) { r in
+                        Text(r.rawValue).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 170)
+            }
             Chart(bars) { bar in
                 BarMark(
-                    x: .value("Week", bar.label),
-                    y: .value("Hours", bar.hours)
+                    x: .value("Period", bar.label),
+                    y: .value("Hours", bar.hours),
+                    width: .ratio(0.62)
                 )
-                .foregroundStyle(bar.hours >= 0 ? Color.positive : Color.negative)
-                .cornerRadius(3)
+                .foregroundStyle(bar.seconds >= 0 ? Color.positive.gradient : Color.negative.gradient)
+                .cornerRadius(6)
             }
             .chartXScale(domain: bars.map { $0.label })
-            .chartYAxisLabel("hours")
-            .frame(height: 170)
+            .chartYAxis {
+                AxisMarks(position: .leading) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+                    AxisValueLabel {
+                        Text(HomeChartsView.hoursLabel(value.as(Double.self)))
+                    }
+                }
+            }
+            .chartXAxis {
+                AxisMarks { _ in
+                    AxisValueLabel()
+                }
+            }
+            .frame(height: 160)
+            .animation(.snappy, value: range)
         }
+        .card()
     }
 
     /// Σ delta over each of the last 8 weeks (week start from the store's calendar), oldest first.
-    private var weekBars: [HomeWeekBar] {
+    private var weekBars: [HomeBar] {
         let cal = model.calendar
         let today = model.today
         let thisWeek = Format.weekStart(of: today, cal)
-        var out: [HomeWeekBar] = []
+        var out: [HomeBar] = []
         for back in stride(from: 7, through: 0, by: -1) {
             let start = thisWeek.adding(days: -7 * back, calendar: cal)
             var total = 0
@@ -75,52 +95,13 @@ struct HomeChartsView: View {
                     total += model.dayResult(for: day).deltaSeconds
                 }
             }
-            out.append(HomeWeekBar(start: start,
-                                   label: HomeChartFormat.weekLabel(start, cal),
-                                   hours: Double(total) / 3600))
+            out.append(HomeBar(id: start, label: HomeChartFormat.weekLabel(start, cal), seconds: total))
         }
         return out
     }
 
-    // MARK: Monthly trend
-
-    private var monthlySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Monthly trend")
-                .font(.headline)
-            Text("Gross extra time vs net change, last 12 months")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            let points = monthPoints
-            Chart {
-                ForEach(points) { point in
-                    BarMark(
-                        x: .value("Month", point.label),
-                        y: .value("Net hours", point.netHours)
-                    )
-                    .foregroundStyle(by: .value("Series", homeNetSeries))
-                    .opacity(0.35)
-                    LineMark(
-                        x: .value("Month", point.label),
-                        y: .value("Gross extra hours", point.grossExtraHours)
-                    )
-                    .foregroundStyle(by: .value("Series", homeGrossSeries))
-                    PointMark(
-                        x: .value("Month", point.label),
-                        y: .value("Gross extra hours", point.grossExtraHours)
-                    )
-                    .foregroundStyle(by: .value("Series", homeGrossSeries))
-                }
-            }
-            .chartForegroundStyleScale([homeGrossSeries: Color.positive, homeNetSeries: Color.blue])
-            .chartXScale(domain: points.map { $0.label })
-            .chartYAxisLabel("hours")
-            .frame(height: 190)
-        }
-    }
-
-    /// Gross extra and net delta per calendar month for the last 12 months, oldest first.
-    private var monthPoints: [HomeMonthPoint] {
+    /// Σ delta per calendar month for the last 12 months, oldest first.
+    private var monthBars: [HomeBar] {
         let cal = model.calendar
         let today = model.today
         var firsts: [DayKey] = []
@@ -129,22 +110,21 @@ struct HomeChartsView: View {
             firsts.append(cursor)
             cursor = HomeChartsView.previousMonth(cursor)
         }
-        var out: [HomeMonthPoint] = []
+        var out: [HomeBar] = []
         for first in firsts.reversed() {
             let last = min(Format.lastOfMonth(first, cal), today)
-            var gross = 0
             var net = 0
             for day in DayKey.days(from: first, through: last, calendar: cal) {
-                let r = model.dayResult(for: day)
-                gross += r.grossExtraSeconds
-                net += r.deltaSeconds
+                net += model.dayResult(for: day).deltaSeconds
             }
-            out.append(HomeMonthPoint(month: first,
-                                      label: HomeChartFormat.shortMonth(first, cal),
-                                      grossExtraHours: Double(gross) / 3600,
-                                      netHours: Double(net) / 3600))
+            out.append(HomeBar(id: first, label: HomeChartFormat.shortMonth(first, cal), seconds: net))
         }
         return out
+    }
+
+    static func hoursLabel(_ hours: Double?) -> String {
+        guard let hours else { return "" }
+        return "\(Int(hours.rounded()))h"
     }
 
     static func previousMonth(_ first: DayKey) -> DayKey {
@@ -180,5 +160,5 @@ enum HomeChartFormat {
 }
 
 #Preview {
-    HomeChartsView().environment(AppModel.preview())
+    HomeChartsView().padding().environment(AppModel.preview())
 }

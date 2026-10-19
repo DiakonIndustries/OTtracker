@@ -33,7 +33,7 @@ struct ImportPreview {
 @MainActor
 @Observable
 final class AppModel {
-    enum Tab: Hashable { case home, log, inbox, timeOff, settings }
+    enum Tab: Hashable { case home, log, inbox, timeOff }
 
     // MARK: Dependencies
 
@@ -69,8 +69,11 @@ final class AppModel {
 
     var selectedTab: Tab = .home
 
-    /// Opens Settings (used by deep links, the Home menu and demo mode).
-    func openSettings() { selectedTab = .settings }
+    /// Settings is a sheet over the tabs, opened from the gear on Today.
+    var showSettings = false
+
+    /// Opens Settings (used by routes and demo mode).
+    func openSettings() { showSettings = true }
     /// Set by deep links and notification actions; the destination view consumes and clears it.
     var pendingRoute: Route?
     var alert: AppAlert?

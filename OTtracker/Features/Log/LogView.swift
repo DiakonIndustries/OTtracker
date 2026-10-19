@@ -129,7 +129,7 @@ struct LogView: View {
                     }
                 }
             }
-            .navigationTitle("Log")
+            .navigationTitle("History")
             .navigationDestination(for: DayKey.self) { day in
                 DayDetailView(day: day)
             }
@@ -208,8 +208,10 @@ struct LogWeekHeader: View {
     var body: some View {
         HStack {
             Text(Format.weekRange(start: weekStart, model.calendar))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
             Spacer()
-            DeltaText(seconds: total, font: .footnote.weight(.semibold))
+            DeltaText(seconds: total, font: .subheadline.weight(.semibold))
         }
         .textCase(nil)
     }
@@ -219,7 +221,7 @@ struct LogWeekHeader: View {
     }
 }
 
-/// One day in the Log list.
+/// One day in History: a date block, what happened, and the day's delta.
 struct LogDayRow: View {
     @Environment(AppModel.self) private var model
     let day: DayKey
@@ -227,35 +229,63 @@ struct LogDayRow: View {
     var body: some View {
         let r = model.dayResult(for: day)
         let cal = model.calendar
-        HStack(alignment: .center, spacing: 12) {
+        let isToday = day == model.today
+        HStack(alignment: .center, spacing: 14) {
+            VStack(spacing: 0) {
+                Text(day.weekday(in: cal).shortName.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(isToday ? Color.white.opacity(0.85) : Color.secondary)
+                Text("\(day.day)")
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(isToday ? Color.white : Color.primary)
+            }
+            .frame(width: 46, height: 46)
+            .background(isToday ? Color.accentColor : Theme.page,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(Format.relativeDay(day, today: model.today, cal))
-                    if r.kind != .workday {
-                        TagView(text: r.kind.label, color: r.kind.color)
-                    }
-                }
-                Text(inOut(r, cal))
+                Text(title(r, cal))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(r.firstIn == nil && r.kind != .workday ? Color.secondary : Color.primary)
+                    .monospacedDigit()
+                Text(subtitle(r))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 3) {
-                DeltaText(seconds: r.deltaSeconds)
-                Text(r.presenceSeconds > 0 ? Format.hm(r.presenceSeconds) : "—")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+            Spacer(minLength: 8)
+            if r.deltaSeconds != 0 || r.hasWindow {
+                DeltaPill(seconds: r.deltaSeconds, font: .footnote.weight(.semibold))
             }
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// "7:02 AM – 5:42 PM", "7:02 AM – now" while still there, else what kind of day it was.
+    private func title(_ r: DayResult, _ cal: Calendar) -> String {
+        if let first = r.firstIn {
+            let out = r.lastOut.map { Format.time($0, cal) } ?? "now"
+            return "\(Format.time(first, cal)) – \(out)"
+        }
+        if r.timeOffSeconds > 0 { return "Time off" }
+        switch r.kind {
+        case .holiday: return model.store.holiday(on: day)?.name ?? "Holiday"
+        case .weekend: return "Weekend"
+        case .dayOff: return "Day off"
+        case .excused: return "Excused"
+        case .workday: return day == model.today ? "Not in yet" : "No time recorded"
         }
     }
 
-    /// "7:02 AM – 5:42 PM", "7:02 AM – …" while still there, or "—".
-    private func inOut(_ r: DayResult, _ cal: Calendar) -> String {
-        guard let first = r.firstIn else { return "—" }
-        let out = r.lastOut.map { Format.time($0, cal) } ?? "…"
-        return "\(Format.time(first, cal)) – \(out)"
+    private func subtitle(_ r: DayResult) -> String {
+        var parts: [String] = []
+        if r.presenceSeconds > 0 { parts.append("\(Format.hm(r.presenceSeconds)) on site") }
+        if r.manualExtraSeconds + r.manualRegularSeconds > 0 {
+            parts.append("\(Format.hm(r.manualExtraSeconds + r.manualRegularSeconds)) elsewhere")
+        }
+        if r.timeOffSeconds > 0 { parts.append("\(Format.hm(r.timeOffSeconds)) off") }
+        if parts.isEmpty { return r.kind == .workday ? "Scheduled workday" : r.kind.label }
+        return parts.joined(separator: " · ")
     }
 }
 

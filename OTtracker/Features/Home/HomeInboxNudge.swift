@@ -1,7 +1,7 @@
 import SwiftUI
 import OTCore
 
-/// One-line pointer to the Inbox tab while questions are waiting.
+/// A tinted banner pointing at the Inbox while questions are waiting.
 struct HomeInboxNudge: View {
     @Environment(AppModel.self) private var model
 
@@ -9,12 +9,16 @@ struct HomeInboxNudge: View {
         Button {
             model.selectedTab = .inbox
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "tray.full")
-                    .font(.title3)
-                    .foregroundStyle(.orange)
-                Text(HomeInboxNudge.title(count: model.inboxCount))
-                    .font(.subheadline.weight(.medium))
+            HStack(spacing: 14) {
+                IconBadge(systemImage: "tray.full.fill", color: .orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(HomeInboxNudge.title(count: model.inboxCount))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("Confirm, adjust or dismiss in the Inbox")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
@@ -23,14 +27,14 @@ struct HomeInboxNudge: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .homeCard()
+        .card()
     }
 
     static func title(count: Int) -> String {
-        count == 1 ? "1 item needs a decision" : "\(count) items need a decision"
+        count == 1 ? "1 thing to review" : "\(count) things to review"
     }
 }
 
 #Preview {
-    HomeInboxNudge().environment(AppModel.preview())
+    HomeInboxNudge().padding().environment(AppModel.preview())
 }
