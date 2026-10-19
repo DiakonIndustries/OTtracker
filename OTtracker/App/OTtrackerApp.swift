@@ -3,7 +3,7 @@ import OTCore
 
 @main
 struct OTtrackerApp: App {
-    @State private var model = AppModel.live()
+    @State private var model = OTtrackerApp.makeModel()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -22,5 +22,13 @@ struct OTtrackerApp: App {
         .backgroundTask(.appRefresh(AppIdentifiers.refreshTaskID)) {
             await model.performBackgroundRefresh()
         }
+    }
+
+    @MainActor
+    private static func makeModel() -> AppModel {
+        #if DEBUG
+        if let scene = DemoMode.scene { return DemoMode.makeModel(scene: scene) }
+        #endif
+        return AppModel.live()
     }
 }

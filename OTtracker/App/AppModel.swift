@@ -68,6 +68,9 @@ final class AppModel {
     private(set) var iCloudAvailable = false
 
     var selectedTab: Tab = .home
+
+    /// Opens Settings (used by deep links, the Home menu and demo mode).
+    func openSettings() { selectedTab = .settings }
     /// Set by deep links and notification actions; the destination view consumes and clears it.
     var pendingRoute: Route?
     var alert: AppAlert?
