@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  core-linux:
+    name: OTCore tests (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.1-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        working-directory: Packages/OTCore
+        run: swift test --parallel 2>&1 | tail -n 60
+
+  core-macos:
+    name: OTCore tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+      - name: swift test
+        working-directory: Packages/OTCore
+        run: swift test --parallel 2>&1 | tail -n 60
+
+  ios-build:
+    name: iOS app build (simulator)
+    runs-on: macos-latest
+    if: "!startsWith(github.event.head_commit.message, 'WIP')"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+      - name: Resolve packages and list
+        run: xcodebuild -project OTtracker.xcodeproj -list
+      - name: Build for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild -project OTtracker.xcodeproj -scheme OTtracker \
+            -destination 'generic/platform=iOS Simulator' -configuration Debug \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            OTHER_SWIFT_FLAGS="-continue-building-after-errors" \
+            build 2>&1 | tee build.log | grep -E "BUILD (SUCCEEDED|FAILED)" || true
+          echo "== compiler errors =="
+          (grep -E "error:" build.log || true) | sed -E 's#^/Users/runner/work/OTtracker/OTtracker/##' | sort -u | head -n 200
+          grep -qE "BUILD SUCCEEDED" build.log
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build.log
+      - name: Capture screenshots
+        if: success()
+        run: tools/screenshots.sh build/Build/Products/Debug-iphonesimulator/OTtracker.app shots
+      - name: Publish screenshots to the ci-screenshots branch
+        if: success()
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd shots
+          echo "Screenshots of ${GITHUB_SHA} (${GITHUB_REF_NAME})" > README.md
+          git init -q -b ci-screenshots
+          git add .
+          git -c user.name="ci" -c user.email="ci@users.noreply.github.com" commit -qm "Screenshots for ${GITHUB_SHA}"
+          git push -qf "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-screenshots

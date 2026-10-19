@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Run the Swift toolchain inside Docker against Packages/OTCore of the repo this script lives in.
+# Usage: tools/swift build | tools/swift test | tools/swift test --filter OTLedgerTests
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PKG="$ROOT/Packages/OTCore"
+IMAGE="${SWIFT_IMAGE:-swift:6.1-noble}"
+if command -v swift >/dev/null 2>&1 && [ -z "${FORCE_DOCKER:-}" ]; then
+  cd "$PKG" && exec swift "$@"
+fi
+exec docker run --rm -v "$PKG":/work -w /work "$IMAGE" swift "$@"
